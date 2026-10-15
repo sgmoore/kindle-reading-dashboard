@@ -6,14 +6,15 @@ Pulls the reading metadata a Kindle stores on-device (reading time, pace/WPM,
 percent progress, furthest page, words read, read/unread status) and writes it
 into Calibre custom columns. Also launches the standalone web dashboard.
 
-Data source is auto-detected: the connected USB Kindle's `documents/` folder
+Data source is auto-detected: the connected Kindle's `documents/` folder over
+USB mass-storage or MTP (Scribe 3 / Colorsoft / 2024+ Paperwhite, Calibre 7.25+)
 (reading stats from the KRDS sidecars: AZW3 `.azw3f`/`.azw3r`, KFX `.yjf`/`.yjr`,
 MOBI `.mbs`/`.mbp1`), falling back to SSH
 (usbnet) which additionally pulls `cc.db` + `fmcache.db` for read-state.
 """
 from calibre.customize import InterfaceActionBase
 
-__license__ = "MIT"
+__license__ = "GPL v3"
 __copyright__ = "zevisvei"
 
 
