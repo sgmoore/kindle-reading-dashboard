@@ -494,6 +494,37 @@ def _sidecar_data(sdr_local):
             "annotations": annots, "has_sidecar": bool(tm or azw3r)}
 
 
+def progress_percent(azw3f, azw3r, cc_percent=None):
+    """How far into the book (0-100). timer.model's totalPercent is NOT this:
+    it is the share of the book read in total, so re-reading and paging back
+    and forth push it past 100%. Order: cc.db p_percentFinished (the device's
+    own value), else furthest page / total pages (apnx page map), else
+    totalPercent capped at 100."""
+    if cc_percent is not None:
+        try:
+            return round(min(max(float(cc_percent), 0.0), 100.0), 1)
+        except (TypeError, ValueError):
+            pass
+    arr = ((azw3r or {}).get("apnx.key") or {}).get("oPNToPosition")
+    pos = None
+    for k in ("fpr", "lpr"):
+        v = (azw3f or {}).get(k)
+        if isinstance(v, dict) and v.get("position") is not None:
+            try:
+                pos = int(v["position"])
+                break
+            except (TypeError, ValueError):
+                pass
+    if isinstance(arr, list) and len(arr) > 1 and pos is not None:
+        import bisect
+        page = bisect.bisect_right(arr, pos) - 1
+        return round(min(100.0, 100.0 * max(page, 0) / (len(arr) - 1)), 1)
+    tp = ((azw3f or {}).get("timer.model") or {}).get("totalPercent")
+    if isinstance(tp, (int, float)):
+        return round(min(100.0, tp * 100), 1)
+    return None
+
+
 def _read_status(fm_rs, rstate):
     """Modern read-state (fmcache) overrides legacy cc.db p_readState."""
     if fm_rs == "READ" or rstate == 2:
@@ -589,7 +620,7 @@ def _books_from_sidecars(fm, skip=()):
             title, author = folder.rsplit(" - ", 1)
         rel = os.path.relpath(sdr_local, CACHE).replace(os.sep, "/")
         fm_rs, dev_sessions, fm_raw = _fm_fields(fm, asin)
-        pct = sc["stats"].get("percent_read") or 0
+        pct = progress_percent(sc["azw3f"], sc["azw3r"]) or 0
         books.append({
             "uuid": "sdr:" + rel,
             "title": title or "(ללא כותרת)",
@@ -598,7 +629,8 @@ def _books_from_sidecars(fm, skip=()):
             "cdeType": None,
             "publisher": None,
             "language": None,
-            "percentFinished": pct or None,
+            "percentFinished": None,
+            "progress": pct,
             "readState": None,
             "read_status": _read_status(fm_rs, 1 if pct > 0 else 0),
             "fm_read_state": fm_rs,
@@ -672,6 +704,7 @@ def _books_from_ccdb(path, fm):
             "publisher": r.get("p_publisher"),
             "language": r.get("p_languages_0"),
             "percentFinished": r.get("p_percentFinished"),
+            "progress": progress_percent(sc["azw3f"], sc["azw3r"], r.get("p_percentFinished")),
             "readState": r.get("p_readState"),
             "read_status": _read_status(fm_rs, r.get("p_readState")),
             "fm_read_state": fm_rs,              # READ / UNREAD / None (modern mark)
