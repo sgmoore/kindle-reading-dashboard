@@ -17,14 +17,16 @@ How vBulletin 3.8 behaves (learned the hard way, 2026-10-15):
 - In edit mode an uploaded file is only *pending* (tied to the edit form's
   posthash) until the edit is saved with "Save Changes". Without a save it is
   lost.
-- Uploading a file identical to one already attached re-uses that attachment
-  (it moves to the pending upload) instead of creating a new one; if that edit
-  is then not saved, the attachment disappears from the post.
+- Uploading a file with the same NAME as an attached one replaces that
+  attachment in place (same id, new content) and moves it to the pending
+  upload; if the edit is then not saved, the attachment disappears from the
+  post.
 
 So the flow is:
-  1. compare the new zip with the attached one; identical -> no upload
-  2. edit #1: upload the new zip, save (post now has old + new), verify
-  3. edit #2: remove the old zip(s), save, verify exactly one zip remains
+  1. compare the new zip with the attached one(s); identical -> no upload
+  2. edit #1: upload as kindle_reading_dashboard-X.Y.Z.zip (a new name, so a
+     new attachment), save (post now has old + new), find it by md5
+  3. edit #2: remove the old zip(s), save, verify exactly the new zip remains
 The post never has zero zips (calibre's plugin updater downloads from it).
 """
 import argparse
@@ -300,8 +302,10 @@ def main():
     zver = zip_version(zpath)
     if zver != latest:
         sys.exit("zip is version %s but CHANGELOG's newest section is %s" % (zver, latest))
+    upload_name = "kindle_reading_dashboard-%s.zip" % zver
     if args.test_variant:
         zpath = make_test_variant(zpath)
+        upload_name = "kindle_reading_dashboard-%s-test%s.zip" % (zver, time.strftime("%H%M%S"))
     new_zip = open(zpath, "rb").read()
     new_md5 = hashlib.md5(new_zip).hexdigest()
 
@@ -320,8 +324,12 @@ def main():
         edit["message"], version_history_bbcode(sections))
     text_changes = msg.replace("\r\n", "\n").strip() != edit["message"].replace("\r\n", "\n").strip()
 
+    if need_upload and upload_name.lower() in (n.lower() for n in before.values()):
+        sys.exit("%s is already attached with different content; refusing to upload the "
+                 "same name (vBulletin would replace it in place)" % upload_name)
+
     print("plan: %s; %s; text %s" % (
-        "upload %s (v%s, md5 %s)" % (os.path.basename(zpath), zver, new_md5[:8]) if need_upload
+        "upload %s (v%s, md5 %s)" % (upload_name, zver, new_md5[:8]) if need_upload
         else "zip identical to attachment %s, no upload" % same[0],
         "then remove %s" % old_ids if old_ids else "nothing to remove",
         "updated" if text_changes else "unchanged"))
@@ -337,7 +345,7 @@ def main():
     if need_upload:
         att = f.attach_page(args.post, edit)
         att = f.manage_attach(args.post, att, {"upload": "Upload"},
-                              files={"attachment[]": (ZIP_NAME, io.BytesIO(new_zip), "application/zip")})
+                              files={"attachment[]": (upload_name, io.BytesIO(new_zip), "application/zip")})
         print("  upload:", summary(att), "pending zips:", zip_attachment_ids(att))
         if page_errors(att):
             sys.exit("upload rejected; post not saved, nothing removed")
@@ -347,10 +355,12 @@ def main():
     after = f.post_zips(args.post)
     print("zips on post after save:", after)
     if need_upload:
-        added = [a for a in after if a not in before]
-        if not added or hashlib.md5(f.attachment_bytes(added[0])).hexdigest() != new_md5:
-            sys.exit("new zip is not on the post after saving; old zip(s) kept: %s" % list(after))
+        added = [a for a in after if a not in before
+                 and hashlib.md5(f.attachment_bytes(a)).hexdigest() == new_md5]
+        if not added:
+            sys.exit("new zip is not on the post after saving; old zip(s) kept: %s" % after)
         print("new zip attached:", added[0])
+        old_ids = [a for a in after if a != added[0]]
 
     # edit #2: remove the old zip(s), then save
     if old_ids:
