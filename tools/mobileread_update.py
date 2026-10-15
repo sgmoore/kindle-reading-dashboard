@@ -173,11 +173,16 @@ def parse_form(page, match):
 
 
 def page_errors(page):
-    i = page.find("The following errors")
-    if i < 0:
-        return None
-    msg = re.sub(r"<[^>]+>", " ", page[i:i + 1500])
-    return re.sub(r"\s+", " ", html.unescape(msg))[:400]
+    """vBulletin's error block, if the response is a rejected form. Thread
+    pages carry the same heading in the hidden Quick Reply template
+    (qr_error_tbody), which is not an error."""
+    for m in re.finditer("The following errors", page):
+        i = m.start()
+        if "qr_error_tbody" in page[max(0, i - 300):i]:
+            continue
+        msg = re.sub(r"<[^>]+>", " ", page[i:i + 1500])
+        return re.sub(r"\s+", " ", html.unescape(msg))[:400]
+    return None
 
 
 def summary(page):
