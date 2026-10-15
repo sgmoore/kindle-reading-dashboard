@@ -86,8 +86,13 @@ Decoding reuses the bundled `krds.py` parser, identical to the toolkit's.
 2. Commit, then tag and push: `git tag plugin-vX.Y.Z && git push origin plugin-vX.Y.Z`.
    The **Calibre plugin release** workflow checks the tag matches `version`,
    builds the zip and publishes the GitHub release (notes = the CHANGELOG section).
-3. The same workflow then updates the MobileRead plugin thread (uploads the new
-   zip before removing the old one, refreshes the Version History) with
-   `tools/mobileread_update.py`. Needs the repository secrets
-   `MOBILEREAD_USER` and `MOBILEREAD_PASSWORD`. To redo only this step, or to
-   test it: Actions -> Calibre plugin release -> Run workflow (dry run by default).
+3. The same workflow then updates the MobileRead plugin thread with
+   `tools/mobileread_update.py`: it uploads the zip as
+   `kindle_reading_dashboard-X.Y.Z.zip`, saves, removes the old zip, saves, and
+   verifies exactly the new zip is on the post (it never leaves the post without
+   one); it also refreshes the Version History. Needs the repository secrets
+   `MOBILEREAD_USER` / `MOBILEREAD_PASSWORD` and the repository variable
+   `MOBILEREAD_AUTO=true` (set it to anything else to skip the forum step).
+   To redo or test only this step: Actions -> Calibre plugin release -> Run
+   workflow (dry run by default; post 4616176, the thread's second post, is the
+   test post: use `attachments_only`, and `test_variant` to force a replace).
