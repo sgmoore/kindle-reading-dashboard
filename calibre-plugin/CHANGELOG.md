@@ -4,6 +4,10 @@ One `## X.Y.Z` section per release. The release workflow uses the matching
 section as the GitHub release notes, and `tools/mobileread_update.py` builds
 the MobileRead "Version History" from the first line of each section.
 
+## 1.2.0
+- Browse buttons for the documents folder, SSH key and dashboard.py in Configure.
+- Open web dashboard works without installing Python (uses Calibre's own when no system Python is found).
+
 ## 1.1.0
 - Support for MTP Kindles (Scribe 3, Colorsoft, 2024 Paperwhite); requires Calibre 7.25+.
 - Clean title/ASIN for books in documents/Downloads/Items01.

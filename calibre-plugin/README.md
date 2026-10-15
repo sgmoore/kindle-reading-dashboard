@@ -35,6 +35,10 @@ last-read date. Six are on by default.
    - **SSH**: host / user / password / optional key. Used only when Source = ssh.
    - **Import automatically when the Kindle connects** — runs the import a few seconds after the device mounts.
    - **dashboard.py**: path to `reader-dashboard/dashboard.py` (for *Open web dashboard*).
+     It runs with a system Python if one is installed (needed for the dashboard's
+     SSH sync, which uses paramiko), otherwise with Calibre's own Python
+     (`calibre-debug -e`), so nothing extra has to be installed.
+   - The folder / file fields have a **Browse…** button.
 2. **Import reading stats (all books)** — syncs, decodes, matches to your library, writes the enabled columns.
 3. **Refresh selected book(s)** — same, but only updates the rows you have selected in the library.
 

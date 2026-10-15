@@ -360,15 +360,15 @@ class KindleReadingAction(InterfaceAction):
                 self.gui, "dashboard.py not set",
                 "Set the path to reader-dashboard/dashboard.py in Configure.",
                 show=True)
-        py = _find_python()
-        if not py:
+        cmd = _dashboard_command(path)
+        if not cmd:
             return error_dialog(self.gui, "Python not found",
-                                "Could not find a system python to run the "
-                                "dashboard. Install Python 3.", show=True)
+                                "Could not find Python or calibre-debug to run "
+                                "the dashboard.", show=True)
         try:
             from calibre_plugins.kindle_reading.engine import _no_window_kwargs
             cwd = os.path.dirname(os.path.abspath(path))
-            subprocess.Popen([py, path, "serve"], cwd=cwd, **_no_window_kwargs())
+            subprocess.Popen(cmd, cwd=cwd, **_no_window_kwargs())
             self.gui.status_bar.show_message(
                 "Launching dashboard… a browser tab will open.", 5000)
         except Exception as e:  # noqa
@@ -379,9 +379,19 @@ def _norm(s):
     return "".join(ch for ch in (s or "").lower() if ch.isalnum())
 
 
-def _find_python():
+def _dashboard_command(path):
+    """How to run dashboard.py. A system Python is preferred because the
+    dashboard's SSH sync needs paramiko; otherwise calibre's own interpreter
+    (calibre-debug -e) runs it with no install at all (stdlib only, so
+    everything but SSH works)."""
     for c in ("python3", "python"):
-        if shutil.which(c):
-            return shutil.which(c)
-    # last resort: calibre's own interpreter (works if paramiko available there)
-    return sys.executable if not sys.executable.lower().endswith("calibre.exe") else None
+        py = shutil.which(c)
+        # skip the Windows Store "python" stub, which only opens the Store
+        if py and "WindowsApps" not in py:
+            return [py, path, "serve"]
+    exe_dir = os.path.dirname(sys.executable)
+    for name in ("calibre-debug.exe", "calibre-debug"):
+        cd = os.path.join(exe_dir, name)
+        if os.path.isfile(cd):
+            return [cd, "-e", path, "--", "serve"]
+    return None

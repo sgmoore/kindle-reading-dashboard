@@ -3,13 +3,13 @@
 from calibre.utils.config import JSONConfig
 
 try:
-    from qt.core import (QWidget, QVBoxLayout, QFormLayout, QLineEdit, QComboBox,
-                         QLabel, QPushButton, QGroupBox, QGridLayout, QCheckBox,
-                         QScrollArea)
+    from qt.core import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
+                         QComboBox, QLabel, QPushButton, QGroupBox, QGridLayout,
+                         QCheckBox, QScrollArea)
 except ImportError:  # very old calibre
-    from PyQt5.Qt import (QWidget, QVBoxLayout, QFormLayout, QLineEdit, QComboBox,
-                          QLabel, QPushButton, QGroupBox, QGridLayout, QCheckBox,
-                          QScrollArea)
+    from PyQt5.Qt import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
+                          QComboBox, QLabel, QPushButton, QGroupBox, QGridLayout,
+                          QCheckBox, QScrollArea)
 
 from calibre_plugins.kindle_reading.fields import (
     FIELDS, FIELD_LABEL, FIELD_DT, DEFAULT_COL, DEFAULT_ON)
@@ -64,7 +64,8 @@ class ConfigWidget(QWidget):
         sf.addRow("Source", self.source)
         self.usb_documents = QLineEdit(prefs["usb_documents"])
         self.usb_documents.setPlaceholderText("blank = auto-detect connected Kindle")
-        sf.addRow("USB documents folder", self.usb_documents)
+        sf.addRow("USB documents folder", self._with_browse(
+            self.usb_documents, "Choose the Kindle's documents folder"))
         v.addWidget(src_box)
 
         # ---- ssh ----
@@ -79,7 +80,8 @@ class ConfigWidget(QWidget):
         ef.addRow("Host", self.ssh_host)
         ef.addRow("User", self.ssh_user)
         ef.addRow("Password", self.ssh_password)
-        ef.addRow("Key file", self.ssh_key)
+        ef.addRow("Key file", self._with_browse(
+            self.ssh_key, "Choose the SSH private key", filters=[]))
         v.addWidget(ssh_box)
 
         # ---- fields (checklist) ----
@@ -121,10 +123,36 @@ class ConfigWidget(QWidget):
         df = QFormLayout(d_box)
         self.dashboard_py = QLineEdit(prefs["dashboard_py"])
         self.dashboard_py.setPlaceholderText("path to reader-dashboard/dashboard.py")
-        df.addRow("dashboard.py", self.dashboard_py)
+        df.addRow("dashboard.py", self._with_browse(
+            self.dashboard_py, "Choose reader-dashboard/dashboard.py",
+            filters=[("Python script", ["py"])]))
         v.addWidget(d_box)
 
         v.addWidget(QLabel("Changes to columns require a Calibre restart."))
+
+    def _with_browse(self, edit, title, filters=None):
+        """`edit` plus a Browse… button. filters=None picks a folder;
+        otherwise a single file (filters as calibre's choose_files takes them)."""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(edit)
+        btn = QPushButton("Browse…")
+        h.addWidget(btn)
+
+        def browse():
+            from calibre.gui2 import choose_dir, choose_files
+            if filters is None:
+                path = choose_dir(self, "kindle-reading-dir", title)
+            else:
+                picked = choose_files(self, "kindle-reading-file", title, filters=filters,
+                                      all_files=True, select_only_single_file=True)
+                path = picked[0] if picked else None
+            if path:
+                edit.setText(path)
+
+        btn.clicked.connect(browse)
+        return row
 
     def _create_columns(self):
         from calibre.gui2.ui import get_gui
