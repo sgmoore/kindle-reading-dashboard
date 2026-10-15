@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import posixpath
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -593,12 +594,23 @@ def build_from_usb(cache):
         folder = os.path.basename(dirpath)
         if folder.endswith(".sdr"):
             folder = folder[:-4]
+        asin = _asin_from_info(azw3f)
+        # Store / Send-to-Kindle books on newer firmware live in
+        # documents/Downloads/Items01/"<title>_<ASIN or 32-char doc id>.sdr"
+        m = _ITEMS_SUFFIX.match(folder)
+        if m and os.path.basename(os.path.dirname(dirpath)).startswith("Items"):
+            folder = m.group(1)
+            if not asin and len(m.group(2)) == 10:
+                asin = m.group(2)
         title, author = folder, ""
         if " - " in folder:
             title, author = folder.rsplit(" - ", 1)
         books.append(_book_from_sidecars(
-            azw3f, azw3r, title, author, _asin_from_info(azw3f), None))
+            azw3f, azw3r, title, author, asin, None))
     return books
+
+
+_ITEMS_SUFFIX = re.compile(r"^(.+)_([A-Z0-9]{10}|[A-Z2-7]{32})$")
 
 
 def _build(cache, used):
