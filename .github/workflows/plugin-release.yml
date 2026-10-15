@@ -1,16 +1,27 @@
 name: Calibre plugin release
 
-# Push a tag like plugin-v1.2.0 -> build the plugin zip and publish a GitHub
-# release with the matching CHANGELOG.md section as notes.
+# Push a tag like plugin-v1.2.0 -> build the plugin zip, publish a GitHub
+# release with the matching CHANGELOG.md section as notes, then update the
+# MobileRead plugin thread (swap the attached zip, refresh Version History).
+#
+# Run manually (Actions -> Calibre plugin release -> Run workflow) to redo only
+# the MobileRead step with the latest release; dry run by default.
 on:
   push:
     tags: ["plugin-v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "MobileRead: only log in and show the new post text"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
 
 jobs:
   release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -51,3 +62,34 @@ jobs:
           gh release create "$TAG" calibre-plugin/kindle_reading_dashboard.zip \
             --repo "$GITHUB_REPOSITORY" --title "Calibre plugin v$VER" \
             --notes-file notes.md --latest
+
+  mobileread:
+    needs: release
+    # after a successful tag release, or on its own when run manually
+    if: always() && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Get the release zip
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern kindle_reading_dashboard.zip --dir dist
+
+      - name: Update the MobileRead plugin thread
+        env:
+          MOBILEREAD_USER: ${{ secrets.MOBILEREAD_USER }}
+          MOBILEREAD_PASSWORD: ${{ secrets.MOBILEREAD_PASSWORD }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          pip install --quiet requests==2.32.3
+          ARGS=""
+          [ -f dist/kindle_reading_dashboard.zip ] && ARGS="--zip dist/kindle_reading_dashboard.zip"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          python3 tools/mobileread_update.py $ARGS
