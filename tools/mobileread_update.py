@@ -3,8 +3,8 @@
 Update the MobileRead "[GUI Plugin] Kindle Reading Dashboard" first post after
 a new plugin release: swap the attached zip and refresh the Version History.
 
-Runs automatically in the "Calibre plugin release" workflow. Plain HTTP
-(requests), no browser. Credentials come from the environment:
+Runs in the "Calibre plugin release" workflow. Plain HTTP (requests), no
+browser. Credentials come from the environment:
 
     MOBILEREAD_USER, MOBILEREAD_PASSWORD   (repository secrets in CI)
 
@@ -13,17 +13,29 @@ Locally:
     pip install requests
     MOBILEREAD_USER=... MOBILEREAD_PASSWORD=... python tools/mobileread_update.py --dry-run
 
-Order matters: the new zip is uploaded BEFORE the old one is removed, so the
-post (and calibre's plugin updater, which downloads from it) never has zero
-zips. The calibre index expects exactly one zip in the first post.
+How vBulletin 3.8 behaves (learned the hard way, 2026-10-15):
+- In edit mode an uploaded file is only *pending* (tied to the edit form's
+  posthash) until the edit is saved with "Save Changes". Without a save it is
+  lost.
+- Uploading a file identical to one already attached re-uses that attachment
+  (it moves to the pending upload) instead of creating a new one; if that edit
+  is then not saved, the attachment disappears from the post.
+
+So the flow is:
+  1. compare the new zip with the attached one; identical -> no upload
+  2. edit #1: upload the new zip, save (post now has old + new), verify
+  3. edit #2: remove the old zip(s), save, verify exactly one zip remains
+The post never has zero zips (calibre's plugin updater downloads from it).
 """
 import argparse
 import hashlib
 import html
+import io
 import os
 import re
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 from html.parser import HTMLParser
@@ -70,6 +82,16 @@ def new_message(old, history):
     if pat.search(old):
         return pat.sub(lambda _m: history, old, count=1)
     return old.rstrip() + "\n\n" + history + "\n"
+
+
+def make_test_variant(path):
+    """Copy of the zip with a marker file, so its hash differs (tests only)."""
+    out = os.path.join(tempfile.mkdtemp(prefix="mr_variant_"), ZIP_NAME)
+    with zipfile.ZipFile(path) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            dst.writestr(item, src.read(item.filename))
+        dst.writestr("TEST_VARIANT.txt", "test upload %s\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -150,11 +172,30 @@ def parse_form(page, match):
     return p.fields, p.submits
 
 
-def check_errors(page, what):
+def page_errors(page):
     i = page.find("The following errors")
-    if i >= 0:
-        msg = re.sub(r"<[^>]+>", " ", page[i:i + 1500])
-        sys.exit("MobileRead rejected %s: %s" % (what, re.sub(r"\s+", " ", html.unescape(msg))[:400]))
+    if i < 0:
+        return None
+    msg = re.sub(r"<[^>]+>", " ", page[i:i + 1500])
+    return re.sub(r"\s+", " ", html.unescape(msg))[:400]
+
+
+def summary(page):
+    """One line about a response, for the log (no tokens, no message text)."""
+    title = re.search(r"<title>(.*?)</title>", page, re.S)
+    title = re.sub(r"\s+", " ", html.unescape(title.group(1))).strip() if title else "?"
+    err = page_errors(page)
+    return "title=%r%s" % (title, (" ERROR=" + err) if err else "")
+
+
+def zip_attachment_ids(page):
+    """delete[ID] buttons whose row mentions a .zip (manage-attachments page)."""
+    ids = []
+    for m in re.finditer(r'name="delete\[(\d+)\]"', page):
+        row = page[max(0, m.start() - 600):m.start()]
+        if re.search(r"\.zip\b", row.rsplit("<tr", 1)[-1], re.I):
+            ids.append(m.group(1))
+    return ids
 
 
 class Forum:
@@ -162,9 +203,11 @@ class Forum:
         self.s = requests.Session()
         self.s.headers["User-Agent"] = "kindle-reading-dashboard release script (+https://github.com/zevisvei/kindle-reading-dashboard)"
 
-    def get(self, path):
+    def get(self, path, raw=False):
         r = self.s.get(FORUM + path, timeout=60)
         r.raise_for_status()
+        if raw:
+            return r.content
         r.encoding = CHARSET
         return r.text
 
@@ -187,24 +230,51 @@ class Forum:
         if "Welcome, " not in self.get("index.php"):
             sys.exit("MobileRead login failed for user %r" % user)
 
+    # -- the post as readers see it ------------------------------------------
+    def post_zips(self, post):
+        """{attachment id: filename} of .zip files shown on the post."""
+        page = self.get("showpost.php?p=%d" % post)
+        return {m.group(1): m.group(2) for m in re.finditer(
+            r'attachment\.php\?attachmentid=(\d+)[^"]*"[^>]*>([^<]+\.zip)</a>', page, re.I)}
 
-def zip_attachment_ids(page):
-    """delete[ID] buttons whose row mentions a .zip (manage-attachments page)."""
-    ids = []
-    for m in re.finditer(r'name="delete\[(\d+)\]"', page):
-        row = page[max(0, m.start() - 600):m.start()]
-        if re.search(r"\.zip\b", row.rsplit("<tr", 1)[-1], re.I):
-            ids.append(m.group(1))
-    return ids
+    def attachment_bytes(self, aid):
+        return self.get("attachment.php?attachmentid=%s" % aid, raw=True)
+
+    # -- one edit session ---------------------------------------------------
+    def open_edit(self, post):
+        page = self.get("editpost.php?do=editpost&p=%d" % post)
+        fields, _ = parse_form(page, "vbform")
+        if "message" not in fields or "posthash" not in fields:
+            sys.exit("could not read the edit form of post %d (not your post?) %s" % (post, summary(page)))
+        return fields
+
+    def attach_page(self, post, edit):
+        return self.get("newattachment.php?p=%d&editpost=1&poststarttime=%s&posthash=%s" % (
+            post, edit["poststarttime"], edit["posthash"]))
+
+    def manage_attach(self, post, att_page, extra, files=None):
+        fields, _ = parse_form(att_page, "manageattach")
+        return self.post("newattachment.php?do=manageattach&p=%d" % post,
+                         dict(fields, **extra), files=files)
+
+    def save_edit(self, post, edit, reason):
+        page = self.post("editpost.php?do=updatepost&p=%d" % post,
+                         dict(edit, reason=reason, sbutton="Save Changes"))
+        print("  save:", summary(page))
+        if page_errors(page):
+            sys.exit("MobileRead rejected the edit")
 
 
 # --------------------------------------------------------------------------- #
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--post", type=int, default=DEFAULT_POST, help="first-post id")
+    ap.add_argument("--post", type=int, default=DEFAULT_POST, help="post id to update")
     ap.add_argument("--zip", help="plugin zip (default: latest GitHub release)")
     ap.add_argument("--changelog", default=os.path.join(ROOT, "calibre-plugin", "CHANGELOG.md"))
-    ap.add_argument("--dry-run", action="store_true", help="log in and show the new post text, change nothing")
+    ap.add_argument("--dry-run", action="store_true", help="log in and show what would change")
+    ap.add_argument("--attachments-only", action="store_true", help="leave the post text alone")
+    ap.add_argument("--test-variant", action="store_true",
+                    help="tests only: add a marker file so the zip differs from the attached one")
     args = ap.parse_args()
 
     user = os.environ.get("MOBILEREAD_USER")
@@ -225,59 +295,72 @@ def main():
     zver = zip_version(zpath)
     if zver != latest:
         sys.exit("zip is version %s but CHANGELOG's newest section is %s" % (zver, latest))
+    if args.test_variant:
+        zpath = make_test_variant(zpath)
+    new_zip = open(zpath, "rb").read()
+    new_md5 = hashlib.md5(new_zip).hexdigest()
 
     f = Forum()
     f.login(user, password)
     print("logged in as", user)
 
-    edit_path = "editpost.php?do=editpost&p=%d" % args.post
-    edit_page = f.get(edit_path)
-    fields, _ = parse_form(edit_page, "vbform")
-    if "message" not in fields or "posthash" not in fields:
-        sys.exit("could not read the edit form of post %d (not your post?)" % args.post)
-    msg = new_message(fields["message"], version_history_bbcode(sections))
+    before = f.post_zips(args.post)
+    print("zips on post %d now: %s" % (args.post, before or "none"))
+    same = [a for a in before if hashlib.md5(f.attachment_bytes(a)).hexdigest() == new_md5]
+    need_upload = not same
+    old_ids = [a for a in before if a not in same]
 
-    att_path = "newattachment.php?p=%d&editpost=1&poststarttime=%s&posthash=%s" % (
-        args.post, fields["poststarttime"], fields["posthash"])
-    att_page = f.get(att_path)
-    old_ids = zip_attachment_ids(att_page)
+    edit = f.open_edit(args.post)
+    msg = edit["message"] if args.attachments_only else new_message(
+        edit["message"], version_history_bbcode(sections))
+    text_changes = msg.replace("\r\n", "\n").strip() != edit["message"].replace("\r\n", "\n").strip()
 
+    print("plan: %s; %s; text %s" % (
+        "upload %s (v%s, md5 %s)" % (os.path.basename(zpath), zver, new_md5[:8]) if need_upload
+        else "zip identical to attachment %s, no upload" % same[0],
+        "then remove %s" % old_ids if old_ids else "nothing to remove",
+        "updated" if text_changes else "unchanged"))
     if args.dry_run:
-        print("---- new post text ----\n" + msg)
-        print("---- would upload %s (v%s), then remove zip attachment(s) %s ----"
-              % (zpath, zver, old_ids))
+        if text_changes:
+            print("---- new post text ----\n" + msg)
+        return
+    if not (need_upload or old_ids or text_changes):
+        print("nothing to do")
         return
 
-    # 1) upload the new zip first ...
-    att_fields, _ = parse_form(att_page, "manageattach")
-    with open(zpath, "rb") as fh:
-        att_page = f.post("newattachment.php?do=manageattach&p=%d" % args.post,
-                          dict(att_fields, upload="Upload"),
-                          files={"attachment[]": (ZIP_NAME, fh, "application/zip")})
-    check_errors(att_page, "the upload")
-    new_ids = [i for i in zip_attachment_ids(att_page) if i not in old_ids]
-    if not new_ids:
-        sys.exit("upload did not show up in the attachment list; nothing removed")
-    print("uploaded attachment", new_ids)
+    # edit #1: upload (pending until saved) + new text, then save
+    if need_upload:
+        att = f.attach_page(args.post, edit)
+        att = f.manage_attach(args.post, att, {"upload": "Upload"},
+                              files={"attachment[]": (ZIP_NAME, io.BytesIO(new_zip), "application/zip")})
+        print("  upload:", summary(att), "pending zips:", zip_attachment_ids(att))
+        if page_errors(att):
+            sys.exit("upload rejected; post not saved, nothing removed")
+    edit["message"] = msg
+    f.save_edit(args.post, edit, "v%s" % zver)
 
-    # ... then remove the old one(s)
-    for aid in old_ids:
-        att_fields, _ = parse_form(att_page, "manageattach")
-        att_page = f.post("newattachment.php?do=manageattach&p=%d" % args.post,
-                          dict(att_fields, **{"delete[%s]" % aid: "Remove"}))
-        check_errors(att_page, "removing attachment %s" % aid)
-    left = zip_attachment_ids(att_page)
-    print("zip attachments now:", left)
-    if len(left) != 1:
-        print("WARNING: post has %d zips; check the attachments by hand" % len(left))
+    after = f.post_zips(args.post)
+    print("zips on post after save:", after)
+    if need_upload:
+        added = [a for a in after if a not in before]
+        if not added or hashlib.md5(f.attachment_bytes(added[0])).hexdigest() != new_md5:
+            sys.exit("new zip is not on the post after saving; old zip(s) kept: %s" % list(after))
+        print("new zip attached:", added[0])
 
-    # 2) save the refreshed text
-    fields["message"] = msg
-    fields["reason"] = "v%s" % zver
-    page = f.post("editpost.php?do=updatepost&p=%d" % args.post,
-                  dict(fields, sbutton="Save Changes"))
-    check_errors(page, "the edit")
-    print("updated post %d (v%s)" % (args.post, zver))
+    # edit #2: remove the old zip(s), then save
+    if old_ids:
+        edit = f.open_edit(args.post)
+        att = f.attach_page(args.post, edit)
+        for aid in old_ids:
+            att = f.manage_attach(args.post, att, {"delete[%s]" % aid: "Remove"})
+            print("  remove %s:" % aid, summary(att))
+        f.save_edit(args.post, edit, "v%s: remove old zip" % zver)
+
+    final = f.post_zips(args.post)
+    print("zips on post %d: %s" % (args.post, final))
+    if len(final) != 1 or hashlib.md5(f.attachment_bytes(next(iter(final)))).hexdigest() != new_md5:
+        sys.exit("expected exactly the new zip on the post; check it by hand")
+    print("done: post %d has v%s" % (args.post, zver))
 
 
 if __name__ == "__main__":
