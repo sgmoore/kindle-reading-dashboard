@@ -181,10 +181,43 @@ class KindleReadingAction(InterfaceAction):
         cfg["dev_prefixes"] = self._device_prefixes()
         source = prefs["source"]
         _dbg("import_stats: source=%s dev_prefixes=%r" % (source, cfg["dev_prefixes"]))
+        if source != "ssh" and not cfg["usb_pref"]:
+            from calibre_plugins.kindle_reading import engine
+            dev = getattr(self.gui.device_manager, "connected_device", None)
+            if engine.is_mtp_kindle(dev):
+                return self._import_via_mtp(dev, cfg, source, restrict_ids, silent)
+        self._start_import_job(cfg, source, restrict_ids, silent)
+
+    def _import_via_mtp(self, dev, cfg, source, restrict_ids, silent):
+        """MTP Kindle: fetch the sidecars as a Calibre device job (the MTP
+        driver only accepts calls on the device thread), then decode them in
+        the usual worker job."""
+        _dbg("_import_via_mtp: queue device job")
+        from calibre_plugins.kindle_reading import engine
+        cache = tempfile.mkdtemp(prefix="kindle_reading_")
+
+        def fetched(job):
+            if job.failed:
+                shutil.rmtree(cache, ignore_errors=True)
+                self._report_failure(
+                    str(getattr(job, "exception", "") or "MTP fetch failed."),
+                    getattr(job, "_details", "") or "", silent)
+                return
+            _dbg("_import_via_mtp: fetched %r sidecars" % (job.result,))
+            cfg["mtp_synced"] = True
+            self._start_import_job(cfg, source, restrict_ids, silent, cache=cache)
+
+        self.gui.device_manager.create_job(
+            engine.sync_mtp, fetched,
+            "Kindle reading: fetch sidecars over MTP", args=[dev, cache])
+        self.gui.status_bar.show_message(
+            "Reading Kindle sidecars over MTP…", 3000)
+
+    def _start_import_job(self, cfg, source, restrict_ids, silent, cache=None):
         job = ThreadedJob(
             "kindle_reading_import",
             "Importing Kindle reading metadata",
-            self._do_import, (cfg, source), {},
+            self._do_import, (cfg, source, cache), {},
             self._import_done)
         # stash per-run options for the callback (callback only gets the job)
         job.kr_restrict = restrict_ids
@@ -194,11 +227,13 @@ class KindleReadingAction(InterfaceAction):
         _dbg("import_stats: job submitted (returning to event loop)")
         self.gui.status_bar.show_message("Importing Kindle reading metadata…", 3000)
 
-    def _do_import(self, cfg, source, notifications=None, abort=None, log=None):
-        """Runs in a worker thread: sync + decode. Returns the book list."""
+    def _do_import(self, cfg, source, cache=None, notifications=None, abort=None,
+                   log=None):
+        """Runs in a worker thread: sync + decode. Returns the book list.
+        `cache` is pre-filled when the sidecars came over MTP."""
         _dbg("_do_import: worker start (source=%s)" % source)
         from calibre_plugins.kindle_reading import engine
-        cache = tempfile.mkdtemp(prefix="kindle_reading_")
+        cache = cache or tempfile.mkdtemp(prefix="kindle_reading_")
 
         def progress(i, n):
             if notifications is not None and n:
@@ -217,15 +252,9 @@ class KindleReadingAction(InterfaceAction):
         restrict = getattr(job, "kr_restrict", None)
         try:
             if job.failed:
-                msg = str(getattr(job, "exception", "") or "Import failed.")
-                det = getattr(job, "traceback", "") or ""
-                _dbg("_import_done: failed: %s" % msg[:80])
-                # auto-on-connect for a non-Kindle device shouldn't nag
-                if not silent:
-                    error_dialog(self.gui, "Kindle reading import",
-                                 msg, det_msg=det, show=True)
-                else:
-                    self.gui.status_bar.show_message("Kindle import: " + msg, 6000)
+                self._report_failure(
+                    str(getattr(job, "exception", "") or "Import failed."),
+                    getattr(job, "traceback", "") or "", silent)
                 return
             result = job.result or {}
             books = [b for b in result.get("books", []) if b.get("has_data")]
@@ -242,6 +271,15 @@ class KindleReadingAction(InterfaceAction):
         except Exception as e:  # noqa
             import traceback
             _dbg("_import_done: EXCEPTION %r\n%s" % (e, traceback.format_exc()))
+
+    def _report_failure(self, msg, det, silent):
+        _dbg("import failed: %s" % msg[:80])
+        # auto-on-connect for a non-Kindle device shouldn't nag
+        if not silent:
+            error_dialog(self.gui, "Kindle reading import",
+                         msg, det_msg=det, show=True)
+        else:
+            self.gui.status_bar.show_message("Kindle import: " + msg, 6000)
 
     # ------------------------------------------------------- write to library
     def _write_columns(self, books, restrict_ids=None):

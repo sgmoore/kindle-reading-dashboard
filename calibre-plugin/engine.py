@@ -355,6 +355,47 @@ def sync_usb(documents, cache, progress=lambda *a: None):
     return len(srcs)
 
 
+def is_mtp_kindle(dev):
+    """True for a Kindle that Calibre talks to over MTP (Scribe 3, Colorsoft,
+    2024+ Paperwhite, ...). Those get no drive letter / mount point, so the
+    USB path cannot see them. Needs Calibre 7.25+ for the by-name MTP calls
+    (Calibre's own file cache deliberately skips the .sdr folders on Kindles)."""
+    try:
+        return (dev is not None and bool(getattr(dev, "is_kindle", False))
+                and hasattr(dev, "list_folder_by_name")
+                and hasattr(dev, "get_file_by_name"))
+    except Exception:  # noqa
+        return False
+
+
+def sync_mtp(dev, cache):
+    """Copy every KRDS sidecar under documents/ from an MTP Kindle into
+    <cache>/documents, mirroring the device layout (same shape sync_usb
+    produces). MUST run on Calibre's device thread (a device-manager job):
+    the MTP driver refuses calls from any other thread."""
+    docs = os.path.join(cache, "documents")
+    os.makedirs(docs, exist_ok=True)
+    fsc = dev.filesystem_cache
+    storage = fsc.storage(getattr(dev, "_main_id", None)) or fsc.entries[0]
+
+    found = []
+
+    def walk(names):
+        for e in dev.list_folder_by_name(storage, *names):
+            if e.is_folder:
+                walk(names + (e.name,))
+            elif e.name.endswith(SIDECAR_EXTS):
+                found.append(names + (e.name,))
+
+    walk(("documents",))
+    for names in found:
+        local = os.path.join(docs, *names[1:])
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        with open(local, "wb") as f:
+            dev.get_file_by_name(f, storage, *names)
+    return len(found)
+
+
 def _scan_for_kindle_documents():
     """Best-effort: find a connected Kindle's documents folder by scanning
     ready drives. Windows uses GetDriveType so empty/optical drives are skipped
@@ -575,13 +616,19 @@ def collect(cache, cfg, source, progress=lambda *a: None):
     if source == "ssh":
         sync_ssh(cache, cfg, progress)
         return _build(cache, "ssh")
+    if cfg.get("mtp_synced"):
+        # sidecars were already pulled into `cache` by sync_mtp (device thread)
+        return _build(cache, "mtp")
 
     # usb / auto: locate the Kindle's documents folder (off the GUI thread)
     docs = resolve_usb_documents(cfg)
     if not docs:
         raise RuntimeError(
             "No Kindle found. Connect the Kindle as a USB drive (or set its "
-            "documents folder in Configure). To pull data over the network "
-            "instead, set Source = ssh in Configure.")
+            "documents folder in Configure). Newer Kindles (Scribe 3, "
+            "Colorsoft, 2024+ Paperwhite) connect over MTP instead: those are "
+            "read through Calibre's own device connection, which needs "
+            "Calibre 7.25 or later. To pull data over the network instead, "
+            "set Source = ssh in Configure.")
     sync_usb(docs, cache, progress)
     return _build(cache, "usb")

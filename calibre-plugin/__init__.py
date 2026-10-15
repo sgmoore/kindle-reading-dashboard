@@ -24,7 +24,7 @@ class KindleReadingPlugin(InterfaceActionBase):
                    "and launch the web dashboard.")
     supported_platforms = ["windows", "osx", "linux"]
     author = "zevisvei"
-    version = (1, 0, 0)
+    version = (1, 1, 0)
     minimum_calibre_version = (5, 0, 0)
 
     # the InterfaceAction lives in ui.py
