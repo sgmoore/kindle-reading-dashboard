@@ -4,17 +4,33 @@ name: Calibre plugin release
 # release with the matching CHANGELOG.md section as notes, then update the
 # MobileRead plugin thread (swap the attached zip, refresh Version History).
 #
+# The MobileRead step runs on tag pushes only when the repository variable
+# MOBILEREAD_AUTO is "true".
+#
 # Run manually (Actions -> Calibre plugin release -> Run workflow) to redo only
-# the MobileRead step with the latest release; dry run by default.
+# the MobileRead step with the latest release; dry run by default. Use the
+# second post of the thread (4616176, "Reserved for test versions") to test.
 on:
   push:
     tags: ["plugin-v*"]
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "MobileRead: only log in and show the new post text"
+        description: "MobileRead: only log in and show what would change"
         type: boolean
         default: true
+      post:
+        description: "Post id (4616175 = plugin first post, 4616176 = test post)"
+        type: string
+        default: "4616175"
+      attachments_only:
+        description: "Leave the post text alone (use for the test post)"
+        type: boolean
+        default: false
+      test_variant:
+        description: "Test only: add a marker file so the zip differs from the attached one"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -66,7 +82,9 @@ jobs:
   mobileread:
     needs: release
     # after a successful tag release, or on its own when run manually
-    if: always() && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch')
+    if: >-
+      always() && (github.event_name == 'workflow_dispatch' ||
+      (needs.release.result == 'success' && vars.MOBILEREAD_AUTO == 'true'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -87,9 +105,14 @@ jobs:
           MOBILEREAD_USER: ${{ secrets.MOBILEREAD_USER }}
           MOBILEREAD_PASSWORD: ${{ secrets.MOBILEREAD_PASSWORD }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          POST: ${{ inputs.post || '4616175' }}
+          ATTACHMENTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.attachments_only }}
+          TEST_VARIANT: ${{ github.event_name == 'workflow_dispatch' && inputs.test_variant }}
         run: |
           pip install --quiet requests==2.32.3
-          ARGS=""
-          [ -f dist/kindle_reading_dashboard.zip ] && ARGS="--zip dist/kindle_reading_dashboard.zip"
+          ARGS="--post $POST"
+          [ -f dist/kindle_reading_dashboard.zip ] && ARGS="$ARGS --zip dist/kindle_reading_dashboard.zip"
           [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          [ "$ATTACHMENTS_ONLY" = "true" ] && ARGS="$ARGS --attachments-only"
+          [ "$TEST_VARIANT" = "true" ] && ARGS="$ARGS --test-variant"
           python3 tools/mobileread_update.py $ARGS
