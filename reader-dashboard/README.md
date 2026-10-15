@@ -8,7 +8,21 @@ python dashboard.py serve              # SSH sync + build + open browser
 python dashboard.py serve --no-sync    # reuse local cache
 python dashboard.py serve --local D:/documents   # USB mass-storage instead of SSH
 python dashboard.py sync | build       # individual steps
+python dashboard.py serve --ccdb D:/backup/cc.db --fmcache D:/backup/fmcache.db
+                                       # use copies of the DBs from elsewhere (read only)
+python dashboard.py serve --cache D:/kindle-cache   # keep synced files elsewhere
 ```
+
+Works with whatever is available:
+
+- sidecars only (USB / MTP, no jailbreak): reading time, pace, progress,
+  highlights; titles from the `.sdr` folder names
+- `+ cc.db`: exact titles, authors, series. Books whose sidecars are not in this
+  cc.db (e.g. an older copy) are still listed, from their sidecars
+- `+ fmcache.db`: read / unread status
+
+The Calibre plugin ships this dashboard and runs it for you (*Open web
+dashboard*), so Calibre users do not need this folder or Python.
 
 - `web/index.html` — sortable/searchable library table
 - `web/book.html` — full per-book metadata + raw JSON of every source

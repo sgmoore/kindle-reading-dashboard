@@ -34,20 +34,30 @@ last-read date. Six are on by default.
    - **USB documents folder**: leave blank to auto-detect the connected Kindle; or set e.g. `E:/documents`.
    - **SSH**: host / user / password / optional key. Used only when Source = ssh.
    - **Import automatically when the Kindle connects** — runs the import a few seconds after the device mounts.
-   - **dashboard.py**: path to `reader-dashboard/dashboard.py` (for *Open web dashboard*).
-     It runs with a system Python if one is installed (needed for the dashboard's
-     SSH sync, which uses paramiko), otherwise with Calibre's own Python
-     (`calibre-debug -e`), so nothing extra has to be installed.
+   - **cc.db file / fmcache.db file** (optional): copies of the Kindle's
+     `/var/local/cc.db` and `/mnt/us/system/fmcache/fmcache.db` from anywhere on
+     your computer (pulled once over SSH, from a backup, …). They are only read,
+     never changed, and add exact titles / series (cc.db) and read status
+     (fmcache.db) to the import and the dashboard. Books on the device that an
+     older cc.db copy does not know are still included, from their sidecars.
+   - **Help: what you need** explains what each source gives and links to the
+     jailbreak / USBNetwork guides.
+   - **Custom dashboard.py**: leave blank to use the dashboard built into the
+     plugin (recommended).
    - The folder / file fields have a **Browse…** button.
-2. **Import reading stats (all books)** — syncs, decodes, matches to your library, writes the enabled columns.
-3. **Refresh selected book(s)** — same, but only updates the rows you have selected in the library.
+2. **Open web dashboard** — reads the Kindle the same way as the import (USB,
+   MTP or SSH), then opens the dashboard that ships inside the plugin in your
+   browser. Nothing to install: it runs on Calibre's own Python. If the Kindle
+   is not connected, the last data read is shown.
+3. **Import reading stats (all books)** — syncs, decodes, matches to your library, writes the enabled columns.
+4. **Refresh selected book(s)** — same, but only updates the rows you have selected in the library.
 
 ## How matching works
 
 Books are matched to your Calibre library by **Amazon ASIN** identifier
 (`amazon` / `mobi-asin` / `amazon_*`) first, then by **normalised title**
-(toggleable). USB-only mode has no `cc.db`, so titles come from the `.sdr`
-folder name and read-status is unavailable — connect over SSH for the full set.
+(toggleable). Without `cc.db` (USB / MTP), titles come from the `.sdr`
+folder name; read status needs `fmcache.db` (SSH, or a copy set in Configure).
 
 ## Device page
 
