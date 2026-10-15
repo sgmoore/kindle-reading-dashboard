@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kindle Library — Reading Dashboard</title>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:,">
 </head>
 <body>
 <div class="wrap">
@@ -13,7 +14,7 @@
       <h1>📚 Kindle Library</h1>
       <div class="sub">Reading time &amp; pace · metadata · annotations</div>
     </div>
-    <button class="primary" onclick="refresh(this)">🔄 Sync from Kindle</button>
+    <button class="primary" id="sync" onclick="refresh(this)">🔄 Sync from Kindle</button>
   </header>
 
   <div class="totals" id="totals"></div>
@@ -107,6 +108,16 @@ function render() {
 
 function esc(s) { return (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
+// Started from the Calibre plugin (sync_mode "none"): Calibre reads the Kindle,
+// so the button can only rebuild the page from the data it already has.
+function syncButton(t) {
+  if (t.sync_mode !== 'none') return;
+  const b = document.getElementById('sync');
+  b.textContent = '↻ Rebuild';
+  b.title = 'Rebuilds the page from the data last read from the Kindle. ' +
+            'To read the Kindle again, use Kindle Reading → Open web dashboard in Calibre.';
+}
+
 function renderTotals(t) {
   document.getElementById('totals').innerHTML = `
     <div class="stat"><div class="n">${t.books}</div><div class="l">Books</div></div>
@@ -125,7 +136,7 @@ document.querySelectorAll('th[data-k]').forEach(th => th.onclick = () => {
 document.getElementById('search').oninput = render;
 document.getElementById('filter').onchange = render;
 
-loadLibrary().then(d => { BOOKS = d.books; renderTotals(d.totals); render(); })
+loadLibrary().then(d => { BOOKS = d.books; renderTotals(d.totals); render(); syncButton(d.totals); })
   .catch(e => { document.getElementById('rows').innerHTML = `<tr><td colspan="9" class="loading">Error: ${e.message}</td></tr>`; });
 </script>
 </body>
