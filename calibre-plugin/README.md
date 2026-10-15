@@ -79,3 +79,13 @@ SSH (`192.168.15.244`) is unreachable, and the SSH fallback over the system
   via plain `ssh` is unreliable; prefer a key, or use paramiko).
 
 Decoding reuses the bundled `krds.py` parser, identical to the toolkit's.
+
+## Releasing
+
+1. Bump `version` in `__init__.py` and add a `## X.Y.Z` section to `CHANGELOG.md`.
+2. Commit, then tag and push: `git tag plugin-vX.Y.Z && git push origin plugin-vX.Y.Z`.
+   The **Calibre plugin release** workflow checks the tag matches `version`,
+   builds the zip and publishes the GitHub release (notes = the CHANGELOG section).
+3. Update the MobileRead plugin thread (swaps the attached zip, refreshes the
+   Version History): `python tools/mobileread_update.py` (`--dry-run` first).
+   Needs `pip install playwright` and Chrome; first run asks you to log in.
