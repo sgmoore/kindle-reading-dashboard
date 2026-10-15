@@ -86,6 +86,8 @@ Decoding reuses the bundled `krds.py` parser, identical to the toolkit's.
 2. Commit, then tag and push: `git tag plugin-vX.Y.Z && git push origin plugin-vX.Y.Z`.
    The **Calibre plugin release** workflow checks the tag matches `version`,
    builds the zip and publishes the GitHub release (notes = the CHANGELOG section).
-3. Update the MobileRead plugin thread (swaps the attached zip, refreshes the
-   Version History): `python tools/mobileread_update.py` (`--dry-run` first).
-   Needs `pip install playwright` and Chrome; first run asks you to log in.
+3. The same workflow then updates the MobileRead plugin thread (uploads the new
+   zip before removing the old one, refreshes the Version History) with
+   `tools/mobileread_update.py`. Needs the repository secrets
+   `MOBILEREAD_USER` and `MOBILEREAD_PASSWORD`. To redo only this step, or to
+   test it: Actions -> Calibre plugin release -> Run workflow (dry run by default).
