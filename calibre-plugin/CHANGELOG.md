@@ -4,6 +4,10 @@ One `## X.Y.Z` section per release. The release workflow uses the matching
 section as the GitHub release notes, and `tools/mobileread_update.py` builds
 the MobileRead "Version History" from the first line of each section.
 
+## 1.3.1
+- Web dashboard opened from Calibre: the page's button is now "Rebuild" (Calibre reads the Kindle; reopen the dashboard from Calibre to read it again).
+- No more 404 for the page icon.
+
 ## 1.3.0
 - Open web dashboard works out of the box: the dashboard ships inside the plugin and reads the Kindle like the import does (USB, MTP or SSH); no dashboard.py path, no Python install.
 - Works without cc.db: the dashboard is built from the reading-data files alone when cc.db is not available.

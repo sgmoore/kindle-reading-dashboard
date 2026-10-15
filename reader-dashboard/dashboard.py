@@ -544,6 +544,7 @@ def build():
         "reading": sum(1 for b in books if b["read_status"] == "reading"),
         "fm_aggregate": fm["aggregate"],   # account-wide {read, manual_unread, unknown}
         "source": source,                  # "cc.db" or "sidecars"
+        "sync_mode": Handler.sync_mode[0],  # ssh / local / none (page's sync button)
     }
     tmin = sum((b["stats"].get("minutes") or 0) for b in books)
     twords = totals["words"]
