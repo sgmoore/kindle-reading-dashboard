@@ -536,7 +536,9 @@ def _book_from_sidecars(azw3f, azw3r, title, author, asin, read_status,
 
 
 def build_from_ccdb(cache):
-    """SSH path: cc.db present → reliable title/author/asin + read-status."""
+    """cc.db present → reliable title/author/asin + read-status. Books whose
+    sidecars are on the device but not in this cc.db (e.g. an older copy set
+    in Configure) are added from the sidecars alone."""
     db_path = os.path.join(cache, "cc.db")
     fm = load_fmcache(os.path.join(cache, "fmcache.db"))
     con = sqlite3.connect(db_path)
@@ -544,7 +546,7 @@ def build_from_ccdb(cache):
     cur = con.cursor()
     cols = [d[1] for d in cur.execute("PRAGMA table_info(Entries)")]
     rows = cur.execute("SELECT * FROM Entries WHERE p_type='Entry:Item'").fetchall()
-    books = []
+    books, used_sdr = [], set()
     for row in rows:
         r = {k: row[k] for k in cols}
         loc = r.get("p_location") or ""
@@ -552,6 +554,7 @@ def build_from_ccdb(cache):
         if loc.startswith("/mnt/us/"):
             base, _ = os.path.splitext(loc[len("/mnt/us/"):])
             sdr = os.path.join(cache, *(base + ".sdr").split("/"))
+            used_sdr.add(os.path.normcase(os.path.normpath(sdr)))
             if os.path.isdir(sdr):
                 for f in os.listdir(sdr):
                     p = os.path.join(sdr, f)
@@ -575,17 +578,19 @@ def build_from_ccdb(cache):
             r.get("p_titles_0_nominal") or "", _author(r),
             cde, status, cc_last_access=r.get("p_lastAccess")))
     con.close()
-    return books
+    return books + build_from_usb(cache, skip=used_sdr)
 
 
-def build_from_usb(cache):
-    """USB path: no cc.db → walk sidecars, derive title from folder, asin from
-    book.info.store when present. No read-status (lives in fmcache, SSH-only)."""
+def build_from_usb(cache, skip=()):
+    """No cc.db → walk sidecars, derive title from folder, asin from
+    book.info.store when present. Read status only when an fmcache.db is
+    available (synced, or a copy set in Configure)."""
     docs = os.path.join(cache, "documents")
+    fm_rs = load_fmcache(os.path.join(cache, "fmcache.db"))["read_state"]
     books = []
     for dirpath, _dirs, files in os.walk(docs):
         f3 = [f for f in files if f.endswith(METRICS_EXTS)]
-        if not f3:
+        if not f3 or os.path.normcase(os.path.normpath(dirpath)) in skip:
             continue
         azw3f = decode_sidecar(os.path.join(dirpath, f3[0]))
         r_files = [f for f in files if f.endswith(READER_EXTS)]
@@ -605,8 +610,9 @@ def build_from_usb(cache):
         title, author = folder, ""
         if " - " in folder:
             title, author = folder.rsplit(" - ", 1)
+        status = {"READ": "read", "UNREAD": "unread"}.get(fm_rs.get(asin))
         books.append(_book_from_sidecars(
-            azw3f, azw3r, title, author, asin, None))
+            azw3f, azw3r, title, author, asin, status))
     return books
 
 
@@ -621,26 +627,47 @@ def _build(cache, used):
     return build_from_usb(cache), used
 
 
-def collect(cache, cfg, source, progress=lambda *a: None):
-    """Sync + build. Returns (books, source_used). Never silently falls back to
-    SSH: SSH only runs when explicitly selected, so a disconnected device gives
-    a clear error instead of a hung/failed SSH attempt."""
+NO_KINDLE_MSG = (
+    "No Kindle found. Connect the Kindle as a USB drive (or set its documents "
+    "folder in Configure). Newer Kindles (Scribe 3, Colorsoft, 2024+ "
+    "Paperwhite) connect over MTP instead: those are read through Calibre's own "
+    "device connection, which needs Calibre 7.25 or later. To pull data over "
+    "the network instead, set Source = ssh in Configure.")
+
+
+def sync(cache, cfg, source, progress=lambda *a: None):
+    """Pull the device's data into `cache` (documents/ + cc.db/fmcache.db when
+    the source has them). Returns the source used. Never silently falls back
+    to SSH: SSH only runs when explicitly selected, so a disconnected device
+    gives a clear error instead of a hung/failed SSH attempt."""
     if source == "ssh":
         sync_ssh(cache, cfg, progress)
-        return _build(cache, "ssh")
+        return "ssh"
     if cfg.get("mtp_synced"):
         # sidecars were already pulled into `cache` by sync_mtp (device thread)
-        return _build(cache, "mtp")
-
+        return "mtp"
     # usb / auto: locate the Kindle's documents folder (off the GUI thread)
     docs = resolve_usb_documents(cfg)
     if not docs:
-        raise RuntimeError(
-            "No Kindle found. Connect the Kindle as a USB drive (or set its "
-            "documents folder in Configure). Newer Kindles (Scribe 3, "
-            "Colorsoft, 2024+ Paperwhite) connect over MTP instead: those are "
-            "read through Calibre's own device connection, which needs "
-            "Calibre 7.25 or later. To pull data over the network instead, "
-            "set Source = ssh in Configure.")
+        raise RuntimeError(NO_KINDLE_MSG)
     sync_usb(docs, cache, progress)
-    return _build(cache, "usb")
+    return "usb"
+
+
+def apply_db_files(cache, cfg):
+    """Copies of cc.db / fmcache.db set in Configure (e.g. pulled earlier over
+    SSH or copied from a backup) take the place of the synced ones. Read only:
+    the user's files are copied, never modified."""
+    for key, name in (("ccdb_path", "cc.db"), ("fmcache_path", "fmcache.db")):
+        src = cfg.get(key) or ""
+        if src:
+            if not os.path.isfile(src):
+                raise RuntimeError("%s set in Configure does not exist: %s" % (name, src))
+            shutil.copyfile(src, os.path.join(cache, name))
+
+
+def collect(cache, cfg, source, progress=lambda *a: None):
+    """Sync + build. Returns (books, source_used)."""
+    used = sync(cache, cfg, source, progress)
+    apply_db_files(cache, cfg)
+    return _build(cache, used)

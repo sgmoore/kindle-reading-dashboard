@@ -171,21 +171,33 @@ class KindleReadingAction(InterfaceAction):
                                 show=True)
         self.import_stats(restrict_ids=set(ids))
 
+    def _cfg(self):
+        """Settings snapshot handed to the worker threads."""
+        cfg = {k: prefs[k] for k in (
+            "source", "ssh_host", "ssh_user", "ssh_password", "ssh_key",
+            "ccdb_path", "fmcache_path")}
+        cfg["usb_pref"] = prefs["usb_documents"]
+        cfg["dev_prefixes"] = self._device_prefixes()
+        return cfg
+
+    def _mtp_device(self, cfg, source):
+        """The connected MTP Kindle to read from, or None (USB/SSH path)."""
+        if source == "ssh" or cfg["usb_pref"]:
+            return None
+        from calibre_plugins.kindle_reading import engine
+        dev = getattr(self.gui.device_manager, "connected_device", None)
+        return dev if engine.is_mtp_kindle(dev) else None
+
     # --------------------------------------------------------- import stats
     def import_stats(self, restrict_ids=None, silent=False):
         _dbg("import_stats: enter (restrict=%s silent=%s)"
              % (None if restrict_ids is None else len(restrict_ids), silent))
-        cfg = {k: prefs[k] for k in (
-            "source", "ssh_host", "ssh_user", "ssh_password", "ssh_key")}
-        cfg["usb_pref"] = prefs["usb_documents"]
-        cfg["dev_prefixes"] = self._device_prefixes()
+        cfg = self._cfg()
         source = prefs["source"]
         _dbg("import_stats: source=%s dev_prefixes=%r" % (source, cfg["dev_prefixes"]))
-        if source != "ssh" and not cfg["usb_pref"]:
-            from calibre_plugins.kindle_reading import engine
-            dev = getattr(self.gui.device_manager, "connected_device", None)
-            if engine.is_mtp_kindle(dev):
-                return self._import_via_mtp(dev, cfg, source, restrict_ids, silent)
+        dev = self._mtp_device(cfg, source)
+        if dev is not None:
+            return self._import_via_mtp(dev, cfg, source, restrict_ids, silent)
         self._start_import_job(cfg, source, restrict_ids, silent)
 
     def _import_via_mtp(self, dev, cfg, source, restrict_ids, silent):
@@ -353,21 +365,110 @@ class KindleReadingAction(InterfaceAction):
 
     # --------------------------------------------------------- web dashboard
     def open_dashboard(self):
+        """Built-in dashboard: read the Kindle (USB / MTP / SSH, like the
+        import), then run the dashboard bundled in this plugin on calibre's
+        own Python. A custom dashboard.py set in Configure runs as before."""
         _dbg("open_dashboard: enter")
-        path = prefs["dashboard_py"]
-        if not path or not os.path.exists(path):
+        custom = prefs["dashboard_py"]
+        if custom:
+            if not os.path.isfile(custom):
+                return error_dialog(
+                    self.gui, "dashboard.py not found",
+                    "The custom dashboard.py set in Configure does not exist:\n%s\n\n"
+                    "Clear the field to use the built-in dashboard." % custom, show=True)
+            return self._launch(_dashboard_command(custom, ["serve"]),
+                                os.path.dirname(os.path.abspath(custom)))
+        try:
+            dash_dir = self._extract_dashboard()
+        except Exception as e:  # noqa
+            return error_dialog(self.gui, "Dashboard", "Could not unpack the built-in "
+                                "dashboard: %s" % e, show=True)
+        cfg, source = self._cfg(), prefs["source"]
+        staging = tempfile.mkdtemp(prefix="kindle_reading_dash_")
+        dev = self._mtp_device(cfg, source)
+        if dev is not None:
+            from calibre_plugins.kindle_reading import engine
+            self.gui.device_manager.create_job(
+                engine.sync_mtp,
+                lambda job: self._dashboard_synced(job, dash_dir, staging, cfg),
+                "Kindle reading: read the Kindle for the dashboard", args=[dev, staging])
+        else:
+            job = ThreadedJob(
+                "kindle_reading_dashboard", "Reading the Kindle for the dashboard",
+                self._dashboard_sync, (cfg, source, staging), {},
+                lambda job: self._dashboard_synced(job, dash_dir, staging, cfg))
+            self.gui.job_manager.run_threaded_job(job)
+        self.gui.status_bar.show_message("Reading the Kindle for the dashboard…", 4000)
+
+    def _dashboard_sync(self, cfg, source, staging, notifications=None, abort=None,
+                        log=None):
+        from calibre_plugins.kindle_reading import engine
+        return engine.sync(staging, cfg, source)
+
+    def _dashboard_synced(self, job, dash_dir, staging, cfg):
+        """Swap the fresh data in (only if the read worked: a disconnected
+        Kindle keeps showing the last data), then start the dashboard."""
+        cache = os.path.join(dash_dir, "cache")
+        note = None
+        if job.failed:
+            shutil.rmtree(staging, ignore_errors=True)
+            note = str(getattr(job, "exception", "") or "could not read the Kindle")
+        else:
+            shutil.rmtree(cache, ignore_errors=True)
+            shutil.move(staging, cache)
+        has_sidecars = os.path.isdir(os.path.join(cache, "documents"))
+        has_ccdb = bool(cfg.get("ccdb_path")) or os.path.isfile(os.path.join(cache, "cc.db"))
+        if not (has_sidecars or has_ccdb):
             return error_dialog(
-                self.gui, "dashboard.py not set",
-                "Set the path to reader-dashboard/dashboard.py in Configure.",
-                show=True)
-        cmd = _dashboard_command(path)
+                self.gui, "No reading data yet",
+                "Connect the Kindle (USB, or MTP with Calibre connected to it), or "
+                "pick a copy of cc.db in Configure, then open the dashboard again."
+                "\n\n" + (note or ""), show=True)
+        args = ["serve", "--no-sync", "--cache", cache]
+        for key, opt in (("ccdb_path", "--ccdb"), ("fmcache_path", "--fmcache")):
+            if cfg.get(key) and os.path.isfile(cfg[key]):
+                args += [opt, cfg[key]]
+        self._launch(_dashboard_command(os.path.join(dash_dir, "dashboard.py"), args,
+                                        prefer_calibre=True), dash_dir)
+        if note:
+            self.gui.status_bar.show_message(
+                "Kindle not read (%s) - showing the last data" % note[:80], 10000)
+
+    def _extract_dashboard(self):
+        """Unpack dashboard/ from this plugin's zip into calibre's config folder
+        (again after each plugin update). The data cache next to it is kept."""
+        from calibre.utils.config import config_dir
+        import zipfile
+        base = self.interface_action_base_plugin
+        ver = ".".join(map(str, base.version))
+        dest = os.path.join(config_dir, "plugins", "kindle_reading_dashboard")
+        marker = os.path.join(dest, ".version")
+        try:
+            with open(marker, encoding="utf-8") as f:
+                if f.read().strip() == ver:
+                    return dest
+        except OSError:
+            pass
+        with zipfile.ZipFile(base.plugin_path) as zf:
+            for name in zf.namelist():
+                if not name.startswith("dashboard/") or name.endswith("/"):
+                    continue
+                target = os.path.join(dest, *name[len("dashboard/"):].split("/"))
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "wb") as f:
+                    f.write(zf.read(name))
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(ver)
+        return dest
+
+    def _launch(self, cmd, cwd):
         if not cmd:
-            return error_dialog(self.gui, "Python not found",
-                                "Could not find Python or calibre-debug to run "
-                                "the dashboard.", show=True)
+            return error_dialog(
+                self.gui, "Python not found",
+                "Could not find calibre-debug or Python to run the dashboard. "
+                "Install Python 3 from https://www.python.org/downloads/", show=True)
         try:
             from calibre_plugins.kindle_reading.engine import _no_window_kwargs
-            cwd = os.path.dirname(os.path.abspath(path))
             subprocess.Popen(cmd, cwd=cwd, **_no_window_kwargs())
             self.gui.status_bar.show_message(
                 "Launching dashboard… a browser tab will open.", 5000)
@@ -379,19 +480,22 @@ def _norm(s):
     return "".join(ch for ch in (s or "").lower() if ch.isalnum())
 
 
-def _dashboard_command(path):
-    """How to run dashboard.py. A system Python is preferred because the
-    dashboard's SSH sync needs paramiko; otherwise calibre's own interpreter
-    (calibre-debug -e) runs it with no install at all (stdlib only, so
-    everything but SSH works)."""
-    for c in ("python3", "python"):
-        py = shutil.which(c)
-        # skip the Windows Store "python" stub, which only opens the Store
-        if py and "WindowsApps" not in py:
-            return [py, path, "serve"]
+def _dashboard_command(path, args, prefer_calibre=False):
+    """How to run dashboard.py. calibre's own interpreter (calibre-debug -e)
+    needs no install (the dashboard is stdlib-only); a system Python is only
+    needed by a custom dashboard.py that syncs over SSH itself (paramiko)."""
+    calibre = None
     exe_dir = os.path.dirname(sys.executable)
     for name in ("calibre-debug.exe", "calibre-debug"):
         cd = os.path.join(exe_dir, name)
         if os.path.isfile(cd):
-            return [cd, "-e", path, "--", "serve"]
-    return None
+            calibre = [cd, "-e", path, "--"] + args
+            break
+    python = None
+    for c in ("python3", "python"):
+        py = shutil.which(c)
+        # skip the Windows Store "python" stub, which only opens the Store
+        if py and "WindowsApps" not in py:
+            python = [py, path] + args
+            break
+    return (calibre or python) if prefer_calibre else (python or calibre)

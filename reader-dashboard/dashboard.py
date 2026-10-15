@@ -15,6 +15,13 @@ Usage:
     python dashboard.py sync               # only pull files into cache/
     python dashboard.py build              # only (re)build web/library.json
 
+    --ccdb PATH / --fmcache PATH   use a cc.db / fmcache.db copied somewhere else
+                                   (read only; never overwritten by a sync)
+    --cache DIR                    keep the synced files in DIR instead of ./cache
+
+Without any cc.db the library is built from the sidecar files alone (title from
+the .sdr folder name; read status from fmcache.db when available).
+
 Connection: SSH defaults to the device in ksh.py (192.168.15.244, root/kindle).
 
 If the environment variable KINDLE_NAME is set a CACHE subdirectory named KINDLE_NAME will be used. This allows for having more than one kindle reader.
@@ -26,6 +33,7 @@ import json
 import logging
 import os
 import posixpath
+import re
 import sqlite3
 import sys
 import webbrowser
@@ -34,13 +42,27 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 KINDLE_NAME = os.environ.get("KINDLE_NAME", "")
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-CACHE = os.path.join(HERE, "cache", KINDLE_NAME)
 WEB = os.path.join(HERE, "web")
-KRDS_DIR = os.path.join(ROOT, "reading-metadata", "scripts")
-DB_PATH = os.path.join(CACHE, "cc.db")
-FMCACHE_PATH = os.path.join(CACHE, "fmcache.db")
-DOCS_CACHE = os.path.join(CACHE, "documents")
+# repo layout: ../reading-metadata/scripts/krds.py; bundled in the calibre
+# plugin: krds.py next to this file
+KRDS_DIR = HERE if os.path.isfile(os.path.join(HERE, "krds.py")) else \
+    os.path.join(ROOT, "reading-metadata", "scripts")
 REMOTE_DOCS = "/mnt/us/documents"
+# cc.db / fmcache.db copied somewhere else (--ccdb / --fmcache): read only
+CCDB_OVERRIDE = None
+FMCACHE_OVERRIDE = None
+
+
+def set_cache(path):
+    """Where synced files live (cc.db, fmcache.db, documents/)."""
+    global CACHE, DB_PATH, FMCACHE_PATH, DOCS_CACHE
+    CACHE = path
+    DB_PATH = os.path.join(CACHE, "cc.db")
+    FMCACHE_PATH = os.path.join(CACHE, "fmcache.db")
+    DOCS_CACHE = os.path.join(CACHE, "documents")
+
+
+set_cache(os.path.join(HERE, "cache", KINDLE_NAME))
 
 # KRDS sidecar extensions, by container format: AZW3, KFX, legacy MOBI.
 # METRICS_* hold timer.model / book.info.store / page.history.store,
@@ -59,7 +81,8 @@ _log.setLevel(logging.ERROR)
 # and an unencrypted .azw3 is reachable, the sync step assembles the book text so
 # highlights show their actual words. Degrades gracefully if the module or
 # KindleUnpack is missing.
-AZW3TEXT_DIR = os.path.join(ROOT, "azw3text")
+AZW3TEXT_DIR = os.path.join(HERE, "azw3text") if os.path.isdir(os.path.join(HERE, "azw3text")) \
+    else os.path.join(ROOT, "azw3text")
 ASSEMBLE_AZW3 = os.environ.get("KRD_ASSEMBLE_AZW3", "").lower() in ("1", "true", "yes", "on")
 BOOK_EXTS = (".azw3", ".azw", ".mobi")
 try:
@@ -186,10 +209,18 @@ def sync_local(docs):
             return None
         assemble_pass(_local_azw3)
 
-    if not os.path.exists(DB_PATH):
-        print("WARNING: %s missing. cc.db is not on the USB partition; pull it once "
-              "via SSH (python ksh.py get /var/local/cc.db reader-dashboard/cache/cc.db)."
-              % DB_PATH)
+    # a few Kindles expose cc.db / fmcache.db on the USB partition too
+    root = os.path.dirname(os.path.normpath(docs))
+    for src, dst in ((os.path.join(root, "cc.db"), DB_PATH),
+                     (os.path.join(root, "system", "fmcache", "fmcache.db"), FMCACHE_PATH)):
+        if os.path.isfile(src):
+            shutil.copy2(src, dst)
+            print("copied %s" % os.path.basename(src))
+
+    if not (os.path.exists(DB_PATH) or CCDB_OVERRIDE):
+        print("note: no cc.db (it is not on the USB partition of most Kindles); the "
+              "library is built from the sidecars alone. For titles from the device "
+              "library and read status, pass --ccdb with a copy of /var/local/cc.db.")
 
 
 # --------------------------------------------------------------------------- #
@@ -355,15 +386,23 @@ def _stats_from_timer(tm, bi):
     return out
 
 
+def _connect_ro(path):
+    """Open a sqlite file read-only (a cc.db/fmcache.db the user copied is
+    never modified)."""
+    import pathlib
+    return sqlite3.connect(pathlib.Path(os.path.abspath(path)).as_uri() + "?mode=ro", uri=True)
+
+
 def load_fmcache():
     """Parse fmcache.db (fast-metrics) for modern read-state marks + device
     reading sessions. Returns {read_state:{asin:..}, sessions:{asin:[..]},
     aggregate:{read,manual_unread,unknown}}. Empty if file absent."""
     out = {"read_state": {}, "sessions": {}, "aggregate": None, "records": {}}
-    if not os.path.exists(FMCACHE_PATH):
+    path = FMCACHE_OVERRIDE or FMCACHE_PATH
+    if not os.path.exists(path):
         return out
     try:
-        con = sqlite3.connect(FMCACHE_PATH)
+        con = _connect_ro(path)
         cur = con.cursor()
     except sqlite3.Error:
         return out
@@ -425,13 +464,162 @@ def load_fmcache():
     return out
 
 
+def _sidecar_data(sdr_local):
+    """Decoded sidecars + derived stats/annotations for one .sdr folder."""
+    azw3f, azw3r = {}, {}
+    if sdr_local and os.path.isdir(sdr_local):
+        for f in os.listdir(sdr_local):
+            p = os.path.join(sdr_local, f)
+            if f.endswith(METRICS_EXTS):
+                azw3f = decode_sidecar(p) or {}
+            elif f.endswith(READER_EXTS):
+                azw3r = decode_sidecar(p) or {}
+    tm = azw3f.get("timer.model")
+    stats = _stats_from_timer(tm, azw3f.get("book.info.store"))
+
+    # annotations (+ the highlighted text itself, if the book was assembled)
+    assembled = load_assembled(sdr_local)
+    if _hl:
+        annots = (_hl.extract_highlights(assembled, azw3r)
+                  if assembled else _hl.annotations_from_azw3r(azw3r))
+    else:
+        annots = []
+        aco = (azw3r.get("annotation.cache.object") or {})
+        if isinstance(aco, dict):
+            for cls, items in aco.items():
+                if isinstance(items, list):
+                    for it in items:
+                        annots.append({"type": cls.split(".")[-1], **it})
+    return {"azw3f": azw3f, "azw3r": azw3r, "stats": stats,
+            "annotations": annots, "has_sidecar": bool(tm or azw3r)}
+
+
+def _read_status(fm_rs, rstate):
+    """Modern read-state (fmcache) overrides legacy cc.db p_readState."""
+    if fm_rs == "READ" or rstate == 2:
+        return "read"
+    if fm_rs == "UNREAD":
+        return "unread"
+    if rstate == 1:
+        return "reading"
+    return "unread"
+
+
+def _fm_fields(fm, key):
+    fm_rs = fm["read_state"].get(key)            # 'READ' / 'UNREAD' / None
+    sessions = sorted(fm["sessions"].get(key, []), key=lambda s: s["start"] or "")
+    raw = {"read_state": fm_rs, "reading_sessions": sessions,
+           "records": fm["records"].get(key, [])}
+    return fm_rs, sessions, raw
+
+
 def build():
     os.makedirs(WEB, exist_ok=True)
-    if not os.path.exists(DB_PATH):
-        sys.exit("cc.db not found in cache. Run 'sync' first.")
     fm = load_fmcache()
+    ccdb = CCDB_OVERRIDE or DB_PATH
+    if os.path.exists(ccdb):
+        books, used_sdr = _books_from_ccdb(ccdb, fm)
+        # books on the device that this cc.db does not know (e.g. an older copy)
+        extra = _books_from_sidecars(fm, skip=used_sdr)
+        if extra:
+            print("%d book(s) not in cc.db, added from their sidecars" % len(extra))
+        books += extra
+        source = "cc.db"
+    elif any(True for _ in _iter_cached_sdr()):
+        print("no cc.db - building from the sidecar files only")
+        books, source = _books_from_sidecars(fm), "sidecars"
+    else:
+        sys.exit("nothing to build: no cc.db and no sidecars in %s. Run 'sync' first." % CACHE)
 
-    con = sqlite3.connect(DB_PATH)
+    # sort: most-read first
+    books.sort(key=lambda b: -(b["stats"].get("minutes") or 0))
+
+    totals = {
+        "books": len(books),
+        "with_sidecar": sum(1 for b in books if b["has_sidecar"]),
+        "hours": round(sum((b["stats"].get("minutes") or 0) for b in books) / 60, 1),
+        "words": sum((b["stats"].get("words_read") or 0) for b in books),
+        "annotations": sum(len(b["annotations"]) for b in books),
+        "read": sum(1 for b in books if b["read_status"] == "read"),
+        "reading": sum(1 for b in books if b["read_status"] == "reading"),
+        "fm_aggregate": fm["aggregate"],   # account-wide {read, manual_unread, unknown}
+        "source": source,                  # "cc.db" or "sidecars"
+    }
+    tmin = sum((b["stats"].get("minutes") or 0) for b in books)
+    twords = totals["words"]
+    totals["avg_wpm"] = round(twords / tmin) if tmin else 0
+
+    out = {"totals": totals, "books": books}
+    with open(os.path.join(WEB, "library.json"), "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=1)
+    print("built library.json from %s: %d books, %d with reading data, %.1f h, %d words"
+          % (source, totals["books"], totals["with_sidecar"], totals["hours"], totals["words"]))
+
+
+# store / Send-to-Kindle books: documents/Downloads/Items01/<title>_<ASIN or doc id>.sdr
+_ITEMS_SUFFIX = re.compile(r"^(.+)_([A-Z0-9]{10}|[A-Z2-7]{32})$")
+
+
+def _books_from_sidecars(fm, skip=()):
+    """One book per cached .sdr folder with a metrics sidecar (minus `skip`).
+    Title/author come from the folder name ("<title> - <author>.sdr"), the
+    ASIN from book.info.store or the Items01 folder suffix. Read status: the
+    fmcache mark if there is one, else reading/unread by progress."""
+    books = []
+    skip = {os.path.normcase(os.path.normpath(p)) for p in skip}
+    for sdr_local in sorted(_iter_cached_sdr()):
+        if os.path.normcase(os.path.normpath(sdr_local)) in skip:
+            continue
+        if not any(f.endswith(METRICS_EXTS) for f in os.listdir(sdr_local)):
+            continue
+        sc = _sidecar_data(sdr_local)
+        folder = os.path.basename(sdr_local)[:-4]
+        bi = sc["azw3f"].get("book.info.store")
+        asin = None
+        if isinstance(bi, dict):
+            asin = next((str(bi[k]) for k in ("asin", "ASIN", "cdeKey", "cde_key")
+                         if bi.get(k)), None)
+        m = _ITEMS_SUFFIX.match(folder)
+        if m and os.path.basename(os.path.dirname(sdr_local)).startswith("Items"):
+            folder = m.group(1)
+            asin = asin or m.group(2)
+        title, author = folder, ""
+        if " - " in folder:
+            title, author = folder.rsplit(" - ", 1)
+        rel = os.path.relpath(sdr_local, CACHE).replace(os.sep, "/")
+        fm_rs, dev_sessions, fm_raw = _fm_fields(fm, asin)
+        pct = sc["stats"].get("percent_read") or 0
+        books.append({
+            "uuid": "sdr:" + rel,
+            "title": title or "(ללא כותרת)",
+            "author": author,
+            "cdeKey": asin,
+            "cdeType": None,
+            "publisher": None,
+            "language": None,
+            "percentFinished": pct or None,
+            "readState": None,
+            "read_status": _read_status(fm_rs, 1 if pct > 0 else 0),
+            "fm_read_state": fm_rs,
+            "device_sessions": dev_sessions,
+            "fmcache_raw": fm_raw,
+            "lastAccess": None,
+            "location": "/mnt/us/" + rel[:-len(".sdr")],
+            "isArchived": None,
+            "contentSize": None,
+            "series": None,
+            "stats": sc["stats"],
+            "annotations": sc["annotations"],
+            "has_sidecar": sc["has_sidecar"],
+            "cc_raw": {},
+            "azw3f": sc["azw3f"],
+            "azw3r": sc["azw3r"],
+        })
+    return books
+
+
+def _books_from_ccdb(path, fm):
+    con = _connect_ro(path)
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
@@ -458,60 +646,22 @@ def build():
     rows = cur.execute(
         "SELECT * FROM Entries WHERE p_type='Entry:Item'").fetchall()
 
-    books = []
+    books, used_sdr = [], []
     for row in rows:
         r = {k: row[k] for k in cols}
         loc = r.get("p_location") or ""
         # locate sidecars: <loc minus ext>.sdr/  under the cache
-        sidecar = {"azw3f": None, "azw3r": None}
         sdr_local = None
         if loc.startswith("/mnt/us/"):
             rel = loc[len("/mnt/us/"):]              # documents/.../book.azw3
             base, _ext = os.path.splitext(rel)
-            sdr_rel = base + ".sdr"
-            sdr_local = os.path.join(CACHE, *sdr_rel.split("/"))
-            if os.path.isdir(sdr_local):
-                for f in os.listdir(sdr_local):
-                    p = os.path.join(sdr_local, f)
-                    if f.endswith(METRICS_EXTS):
-                        sidecar["azw3f"] = decode_sidecar(p)
-                    elif f.endswith(READER_EXTS):
-                        sidecar["azw3r"] = decode_sidecar(p)
-
-        azw3f = sidecar["azw3f"] or {}
-        azw3r = sidecar["azw3r"] or {}
-        tm = azw3f.get("timer.model")
-        bi = azw3f.get("book.info.store")
-        stats = _stats_from_timer(tm, bi)
-
-        # annotations (+ the highlighted text itself, if the book was assembled)
-        assembled = load_assembled(sdr_local)
-        if _hl:
-            annots = (_hl.extract_highlights(assembled, azw3r)
-                      if assembled else _hl.annotations_from_azw3r(azw3r))
-        else:
-            annots = []
-            aco = (azw3r.get("annotation.cache.object") or {})
-            if isinstance(aco, dict):
-                for cls, items in aco.items():
-                    if isinstance(items, list):
-                        for it in items:
-                            annots.append({"type": cls.split(".")[-1], **it})
+            sdr_local = os.path.join(CACHE, *(base + ".sdr").split("/"))
+            used_sdr.append(sdr_local)
+        sc = _sidecar_data(sdr_local)
 
         cde = r.get("p_cdeKey")
         ser = series_of.get(cde)
-        # modern read-state (fmcache) overrides legacy cc.db p_readState
-        fm_rs = fm["read_state"].get(cde)            # 'READ' / 'UNREAD' / None
-        dev_sessions = sorted(fm["sessions"].get(cde, []), key=lambda s: s["start"] or "")
-        rstate = r.get("p_readState")
-        if fm_rs == "READ" or rstate == 2:
-            read_status = "read"
-        elif fm_rs == "UNREAD":
-            read_status = "unread"
-        elif rstate == 1:
-            read_status = "reading"
-        else:
-            read_status = "unread"
+        fm_rs, dev_sessions, fm_raw = _fm_fields(fm, cde)
         book = {
             "uuid": r.get("p_uuid"),
             "title": r.get("p_titles_0_nominal") or "(ללא כותרת)",
@@ -522,14 +672,10 @@ def build():
             "language": r.get("p_languages_0"),
             "percentFinished": r.get("p_percentFinished"),
             "readState": r.get("p_readState"),
-            "read_status": read_status,          # read / reading / unread (fmcache-aware)
+            "read_status": _read_status(fm_rs, r.get("p_readState")),
             "fm_read_state": fm_rs,              # READ / UNREAD / None (modern mark)
             "device_sessions": dev_sessions,     # from fmcache reading_sessions
-            "fmcache_raw": {                     # raw data from the new DB (fmcache)
-                "read_state": fm_rs,
-                "reading_sessions": dev_sessions,
-                "records": fm["records"].get(cde, []),
-            },
+            "fmcache_raw": fm_raw,               # raw data from the new DB (fmcache)
             "lastAccess": r.get("p_lastAccess"),
             "location": loc,
             "isArchived": r.get("p_isArchived"),
@@ -539,39 +685,17 @@ def build():
                 "name": series_name.get(ser["seriesId"]) if ser else None,
                 "seriesId": ser["seriesId"] if ser else None,
             } if ser else None,
-            "stats": stats,
-            "annotations": annots,
-            "has_sidecar": bool(tm or azw3r),
+            "stats": sc["stats"],
+            "annotations": sc["annotations"],
+            "has_sidecar": sc["has_sidecar"],
             # raw blobs for the detail page
             "cc_raw": {k: v for k, v in r.items() if v is not None},
-            "azw3f": azw3f,
-            "azw3r": azw3r,
+            "azw3f": sc["azw3f"],
+            "azw3r": sc["azw3r"],
         }
         books.append(book)
-
-    # sort: most-read first
-    books.sort(key=lambda b: -(b["stats"].get("minutes") or 0))
-
-    totals = {
-        "books": len(books),
-        "with_sidecar": sum(1 for b in books if b["has_sidecar"]),
-        "hours": round(sum((b["stats"].get("minutes") or 0) for b in books) / 60, 1),
-        "words": sum((b["stats"].get("words_read") or 0) for b in books),
-        "annotations": sum(len(b["annotations"]) for b in books),
-        "read": sum(1 for b in books if b["read_status"] == "read"),
-        "reading": sum(1 for b in books if b["read_status"] == "reading"),
-        "fm_aggregate": fm["aggregate"],   # account-wide {read, manual_unread, unknown}
-    }
-    tmin = sum((b["stats"].get("minutes") or 0) for b in books)
-    twords = totals["words"]
-    totals["avg_wpm"] = round(twords / tmin) if tmin else 0
-
-    out = {"totals": totals, "books": books}
-    with open(os.path.join(WEB, "library.json"), "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=1)
     con.close()
-    print("built library.json: %d books, %d with reading data, %.1f h, %d words"
-          % (totals["books"], totals["with_sidecar"], totals["hours"], totals["words"]))
+    return books, used_sdr
 
 
 # --------------------------------------------------------------------------- #
@@ -599,7 +723,7 @@ class Handler(SimpleHTTPRequestHandler):
                     sync_ssh()
                 elif mode == "local" and local:
                     sync_local(local)
-                build()
+                build()                 # mode "none": data is synced by the caller
                 self._json({"ok": True})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)}, 500)
@@ -617,8 +741,15 @@ class Handler(SimpleHTTPRequestHandler):
 
 def serve(port=8742):
     os.chdir(WEB)
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = "http://127.0.0.1:%d/" % port
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError:
+        # a dashboard is already running on this port (it serves the same web/
+        # folder, so it already has the library.json just built): reuse it
+        print("dashboard already running at %s" % url)
+        webbrowser.open(url)
+        return
     print("serving dashboard at %s  (Ctrl-C to stop)" % url)
     try:
         webbrowser.open(url)
@@ -638,9 +769,28 @@ def main():
                     help="read sidecars from a local/USB documents folder instead of SSH")
     ap.add_argument("--no-sync", action="store_true", help="skip syncing, reuse cache")
     ap.add_argument("--port", type=int, default=8742)
+    ap.add_argument("--cache", metavar="DIR", help="folder for synced files (default ./cache)")
+    ap.add_argument("--ccdb", metavar="PATH",
+                    help="use this cc.db (e.g. a copy) instead of the synced one; read only")
+    ap.add_argument("--fmcache", metavar="PATH",
+                    help="use this fmcache.db instead of the synced one; read only")
     args = ap.parse_args()
 
-    mode = ("local", args.local) if args.local else ("ssh", None)
+    global CCDB_OVERRIDE, FMCACHE_OVERRIDE
+    if args.cache:
+        set_cache(os.path.abspath(args.cache))
+    for opt, path in (("--ccdb", args.ccdb), ("--fmcache", args.fmcache)):
+        if path and not os.path.isfile(path):
+            sys.exit("%s: no such file: %s" % (opt, path))
+    CCDB_OVERRIDE = args.ccdb and os.path.abspath(args.ccdb)
+    FMCACHE_OVERRIDE = args.fmcache and os.path.abspath(args.fmcache)
+
+    if args.local:
+        mode = ("local", args.local)
+    elif args.no_sync:
+        mode = ("none", None)            # the page's refresh button only rebuilds
+    else:
+        mode = ("ssh", None)
     Handler.sync_mode = mode
 
     if args.cmd == "sync":

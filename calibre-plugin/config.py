@@ -23,7 +23,28 @@ prefs.defaults["ssh_host"] = "192.168.15.244"
 prefs.defaults["ssh_user"] = "root"
 prefs.defaults["ssh_password"] = "kindle"
 prefs.defaults["ssh_key"] = ""              # private-key path (optional)
-prefs.defaults["dashboard_py"] = ""         # path to reader-dashboard/dashboard.py
+prefs.defaults["dashboard_py"] = ""         # custom dashboard.py (blank = the bundled one)
+prefs.defaults["ccdb_path"] = ""            # a copy of the Kindle's cc.db (optional)
+prefs.defaults["fmcache_path"] = ""         # a copy of the Kindle's fmcache.db (optional)
+
+HELP_HTML = """
+<b>What works with what</b><br>
+&bull; <b>USB or MTP only</b> (any Kindle, no jailbreak): reading time, pace,
+progress, furthest page, words read, highlights. Titles come from the file names.<br>
+&bull; <b>+ cc.db</b> (the Kindle's library database, <code>/var/local/cc.db</code>):
+exact titles, authors, series and ASINs.<br>
+&bull; <b>+ fmcache.db</b> (<code>/mnt/us/system/fmcache/fmcache.db</code>):
+read / unread status as marked on the Kindle.<br><br>
+cc.db is not visible over USB on most Kindles. To get it you need a
+<a href="https://kindlemodding.org/jailbreaking/">jailbroken Kindle</a> with
+<a href="https://www.mobileread.com/forums/showthread.php?t=225030">USBNetwork (SSH)</a>:
+then either set Source = ssh, or copy both files to your computer once and
+pick them below. Copies are only read, never changed.<br><br>
+Nothing else needs to be installed: the web dashboard runs on Calibre's own
+Python. Only a <i>custom</i> dashboard.py that syncs over SSH by itself needs
+<a href="https://www.python.org/downloads/">Python 3</a> with
+<code>pip install paramiko</code>.
+"""
 prefs.defaults["match_by_title"] = True
 prefs.defaults["auto_on_connect"] = False   # import automatically when device connects
 # per-field enable + column lookup name, keyed by field key
@@ -66,7 +87,24 @@ class ConfigWidget(QWidget):
         self.usb_documents.setPlaceholderText("blank = auto-detect connected Kindle")
         sf.addRow("USB documents folder", self._with_browse(
             self.usb_documents, "Choose the Kindle's documents folder"))
+        db_filter = [("SQLite database", ["db"])]
+        self.ccdb_path = QLineEdit(prefs["ccdb_path"])
+        self.ccdb_path.setPlaceholderText("optional: a copy of cc.db")
+        sf.addRow("cc.db file", self._with_browse(
+            self.ccdb_path, "Choose a copy of the Kindle's cc.db", filters=db_filter))
+        self.fmcache_path = QLineEdit(prefs["fmcache_path"])
+        self.fmcache_path.setPlaceholderText("optional: a copy of fmcache.db")
+        sf.addRow("fmcache.db file", self._with_browse(
+            self.fmcache_path, "Choose a copy of the Kindle's fmcache.db", filters=db_filter))
         v.addWidget(src_box)
+
+        help_box = QGroupBox("Help: what you need")
+        hl = QVBoxLayout(help_box)
+        help_label = QLabel(HELP_HTML)
+        help_label.setWordWrap(True)
+        help_label.setOpenExternalLinks(True)
+        hl.addWidget(help_label)
+        v.addWidget(help_box)
 
         # ---- ssh ----
         ssh_box = QGroupBox("SSH (usbnet) — only used when Source = ssh")
@@ -122,8 +160,8 @@ class ConfigWidget(QWidget):
         d_box = QGroupBox("Web dashboard")
         df = QFormLayout(d_box)
         self.dashboard_py = QLineEdit(prefs["dashboard_py"])
-        self.dashboard_py.setPlaceholderText("path to reader-dashboard/dashboard.py")
-        df.addRow("dashboard.py", self._with_browse(
+        self.dashboard_py.setPlaceholderText("blank = built-in dashboard (recommended)")
+        df.addRow("Custom dashboard.py", self._with_browse(
             self.dashboard_py, "Choose reader-dashboard/dashboard.py",
             filters=[("Python script", ["py"])]))
         v.addWidget(d_box)
@@ -136,7 +174,7 @@ class ConfigWidget(QWidget):
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(edit)
+        h.addWidget(edit, 1)
         btn = QPushButton("Browse…")
         h.addWidget(btn)
 
@@ -193,6 +231,8 @@ class ConfigWidget(QWidget):
         prefs["ssh_password"] = self.ssh_password.text()
         prefs["ssh_key"] = self.ssh_key.text().strip()
         prefs["dashboard_py"] = self.dashboard_py.text().strip()
+        prefs["ccdb_path"] = self.ccdb_path.text().strip()
+        prefs["fmcache_path"] = self.fmcache_path.text().strip()
         prefs["match_by_title"] = bool(self.match_by_title.isChecked())
         prefs["auto_on_connect"] = bool(self.auto_on_connect.isChecked())
         on, cols = {}, {}
