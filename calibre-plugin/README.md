@@ -68,6 +68,11 @@ SSH (`192.168.15.244`) is unreachable, and the SSH fallback over the system
 
 - **USB mass-storage** exposes the sidecars (reading time, pace, progress,
   furthest page, annotations) but **not** `cc.db`/`fmcache.db`.
+- **MTP** (Scribe 3, Colorsoft, 2024+ Paperwhite — no drive letter): when
+  Calibre itself is connected to the Kindle, the sidecars are read through
+  Calibre's device connection. Same data as USB mass-storage. Needs
+  **Calibre 7.25+**. Used automatically for `auto`/`usb` unless a USB
+  documents folder is set.
 - **SSH (usbnet)** pulls everything, including modern "Mark as Read" state.
 - SSH uses **paramiko** if Calibre has it, otherwise the system **`ssh`**
   binary (key-based / agent auth recommended — non-interactive password auth
