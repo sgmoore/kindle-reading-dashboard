@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 
-from calibre.gui2 import error_dialog, info_dialog
+from calibre.gui2 import Dispatcher, error_dialog, info_dialog
 from calibre.gui2.actions import InterfaceAction
 from calibre.gui2.threaded_jobs import ThreadedJob
 
@@ -230,7 +230,9 @@ class KindleReadingAction(InterfaceAction):
             "kindle_reading_import",
             "Importing Kindle reading metadata",
             self._do_import, (cfg, source, cache), {},
-            self._import_done)
+            # ThreadedJob calls its callback in the worker thread; Dispatcher
+            # moves it to the GUI thread (it writes the library and the UI)
+            Dispatcher(self._import_done))
         # stash per-run options for the callback (callback only gets the job)
         job.kr_restrict = restrict_ids
         job.kr_silent = bool(silent)
@@ -396,7 +398,7 @@ class KindleReadingAction(InterfaceAction):
             job = ThreadedJob(
                 "kindle_reading_dashboard", "Reading the Kindle for the dashboard",
                 self._dashboard_sync, (cfg, source, staging), {},
-                lambda job: self._dashboard_synced(job, dash_dir, staging, cfg))
+                Dispatcher(lambda job: self._dashboard_synced(job, dash_dir, staging, cfg)))
             self.gui.job_manager.run_threaded_job(job)
         self.gui.status_bar.show_message("Reading the Kindle for the dashboard…", 4000)
 

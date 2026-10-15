@@ -43,9 +43,12 @@ function readRank(b) {
 function qparam(k) {
   return new URLSearchParams(location.search).get(k);
 }
+// How far into the book (0-100). b.progress comes from build(); stats.percent_read
+// (timer.model totalPercent) is the share read in total and can pass 100%.
 function pct(b) {
-  const p = (b.stats && b.stats.percent_read) || b.percentFinished || 0;
-  return Math.round(p);
+  const p = b.progress != null ? b.progress
+          : (b.percentFinished || (b.stats && b.stats.percent_read) || 0);
+  return Math.round(Math.min(100, Math.max(0, p)));
 }
 
 // ---- page mapping (apnx oPNToPosition: index = printed page) ----

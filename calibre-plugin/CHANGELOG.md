@@ -4,6 +4,10 @@ One `## X.Y.Z` section per release. The release workflow uses the matching
 section as the GitHub release notes, and `tools/mobileread_update.py` builds
 the MobileRead "Version History" from the first line of each section.
 
+## 1.3.2
+- Progress % no longer goes past 100: it is now how far into the book you are (the Kindle's own value from cc.db, else furthest page / total pages), not the cumulative share read.
+- Fixed "QObject: Cannot create children for a parent that is in a different thread" on import / refresh: results are now applied in Calibre's GUI thread.
+
 ## 1.3.1
 - Web dashboard opened from Calibre: the page's button is now "Rebuild" (Calibre reads the Kindle; reopen the dashboard from Calibre to read it again).
 - No more 404 for the page icon.

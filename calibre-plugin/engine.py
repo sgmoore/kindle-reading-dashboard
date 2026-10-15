@@ -506,15 +506,31 @@ def _last_read(azw3f, cc_last_access=None):
     return _to_datetime(cc_last_access)   # cc.db p_lastAccess (epoch seconds)
 
 
+def _progress(stats, pg, tot, cc_percent):
+    """How far into the book (0-100). timer.model's totalPercent is the share
+    read in total, so re-reading pushes it past 100%. Order: cc.db
+    p_percentFinished (the device's own value), else furthest page / total
+    pages, else totalPercent capped at 100."""
+    if cc_percent is not None:
+        try:
+            return min(max(float(cc_percent), 0.0), 100.0)
+        except (TypeError, ValueError):
+            pass
+    if pg is not None and tot:
+        return min(100.0, 100.0 * pg / tot)
+    p = stats.get("percent_read")
+    return min(100.0, p) if p else None
+
+
 def _book_from_sidecars(azw3f, azw3r, title, author, asin, read_status,
-                        cc_last_access=None):
+                        cc_last_access=None, cc_percent=None):
     stats = _stats_from_timer(azw3f.get("timer.model"), azw3f.get("book.info.store"))
     pos = _furthest_position(azw3f)
     pg = _page_of(azw3r, pos)
     tot = _total_pages(azw3r)
     page_str = ("%d/%d" % (pg, tot)) if (pg is not None and tot) else (
         str(pg) if pg is not None else None)
-    pct = stats.get("percent_read")
+    pct = _progress(stats, pg, tot, cc_percent)
     return {
         "title": title,
         "author": author,
@@ -524,7 +540,7 @@ def _book_from_sidecars(azw3f, azw3r, title, author, asin, read_status,
         "minutes": int(round(stats["minutes"])) if stats.get("minutes") else None,
         "wpm": stats.get("wpm_reading"),
         "wpm_overall": stats.get("wpm_overall"),
-        "progress": int(round(pct)) if pct else None,
+        "progress": int(round(pct)) if pct is not None else None,
         "page": page_str,
         "words": stats.get("words_read"),
         "book_words": stats.get("book_words") or None,
@@ -576,7 +592,8 @@ def build_from_ccdb(cache):
         books.append(_book_from_sidecars(
             azw3f, azw3r,
             r.get("p_titles_0_nominal") or "", _author(r),
-            cde, status, cc_last_access=r.get("p_lastAccess")))
+            cde, status, cc_last_access=r.get("p_lastAccess"),
+            cc_percent=r.get("p_percentFinished")))
     con.close()
     return books + build_from_usb(cache, skip=used_sdr)
 
