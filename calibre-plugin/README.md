@@ -54,10 +54,20 @@ last-read date. Six are on by default.
 
 ## How matching works
 
-Books are matched to your Calibre library by **Amazon ASIN** identifier
-(`amazon` / `mobi-asin` / `amazon_*`) first, then by **normalised title**
-(toggleable). Without `cc.db` (USB / MTP), titles come from the `.sdr`
-folder name; read status needs `fmcache.db` (SSH, or a copy set in Configure).
+Each book's reading data is matched to your Calibre library in this order:
+
+1. **Calibre's own device matching** — the same matching as the Device tab
+   (UUID, application id, title + author). Used when Calibre is connected to
+   the Kindle; it covers books sent from Calibre.
+2. **Amazon ASIN** identifier (`amazon` / `mobi-asin` / `amazon_*`).
+3. **Title** (optional): only when it is unambiguous — if several library books
+   share the title, the author has to match too, otherwise the book is skipped.
+
+Only books that were opened on the Kindle have reading data, so the count is
+usually much smaller than the library on the device. "Books updated" counts
+books whose values actually changed. Without `cc.db` (USB / MTP), titles come
+from the `.sdr` folder name; read status needs `fmcache.db` (SSH, or a copy
+set in Configure).
 
 ## Device page
 

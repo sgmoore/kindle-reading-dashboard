@@ -522,8 +522,20 @@ def _progress(stats, pg, tot, cc_percent):
     return min(100.0, p) if p else None
 
 
+def device_key(path):
+    """Key that links a book file and its .sdr sidecar folder on the device:
+    the path from the device root without extension / .sdr, lower case
+    ("documents/foo/title - author"). Matches calibre's Book.lpath."""
+    p = path.replace("\\", "/").strip("/")
+    if p.lower().endswith(".sdr"):
+        p = p[:-4]
+    else:
+        p = p.rsplit(".", 1)[0] if "." in p.rsplit("/", 1)[-1] else p
+    return p.lower()
+
+
 def _book_from_sidecars(azw3f, azw3r, title, author, asin, read_status,
-                        cc_last_access=None, cc_percent=None):
+                        cc_last_access=None, cc_percent=None, sdr_key=None):
     stats = _stats_from_timer(azw3f.get("timer.model"), azw3f.get("book.info.store"))
     pos = _furthest_position(azw3f)
     pg = _page_of(azw3r, pos)
@@ -536,6 +548,7 @@ def _book_from_sidecars(azw3f, azw3r, title, author, asin, read_status,
         "author": author,
         "asin": asin,
         "norm_title": _norm(title),
+        "device_key": sdr_key,           # links to calibre's device matching (lpath)
         "hours": stats.get("hours"),
         "minutes": int(round(stats["minutes"])) if stats.get("minutes") else None,
         "wpm": stats.get("wpm_reading"),
@@ -567,6 +580,7 @@ def build_from_ccdb(cache):
         r = {k: row[k] for k in cols}
         loc = r.get("p_location") or ""
         azw3f, azw3r = {}, {}
+        key = device_key(loc[len("/mnt/us/"):]) if loc.startswith("/mnt/us/") else None
         if loc.startswith("/mnt/us/"):
             base, _ = os.path.splitext(loc[len("/mnt/us/"):])
             sdr = os.path.join(cache, *(base + ".sdr").split("/"))
@@ -593,7 +607,7 @@ def build_from_ccdb(cache):
             azw3f, azw3r,
             r.get("p_titles_0_nominal") or "", _author(r),
             cde, status, cc_last_access=r.get("p_lastAccess"),
-            cc_percent=r.get("p_percentFinished")))
+            cc_percent=r.get("p_percentFinished"), sdr_key=key))
     con.close()
     return books + build_from_usb(cache, skip=used_sdr)
 
@@ -629,7 +643,8 @@ def build_from_usb(cache, skip=()):
             title, author = folder.rsplit(" - ", 1)
         status = {"READ": "read", "UNREAD": "unread"}.get(fm_rs.get(asin))
         books.append(_book_from_sidecars(
-            azw3f, azw3r, title, author, asin, status))
+            azw3f, azw3r, title, author, asin, status,
+            sdr_key=device_key(os.path.relpath(dirpath, cache))))
     return books
 
 
