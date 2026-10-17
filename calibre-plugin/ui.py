@@ -278,9 +278,19 @@ class KindleReadingAction(InterfaceAction):
                  % (matched, updated))
             # Non-blocking: a modal dialog from the job callback can wedge the
             # event loop. Report via the status bar instead.
+            m = getattr(self, "_last_match", {})
+            skipped = []
+            if m.get("unmatched"):
+                skipped.append("%d not in the library" % m["unmatched"])
+            if m.get("ambiguous"):
+                skipped.append("%d skipped: same title on several books" % m["ambiguous"])
             self.gui.status_bar.show_message(
-                "Kindle import: %d books, matched %d, updated %d values (source: %s)"
-                % (len(books), matched, updated, used), 10000)
+                "Kindle import: %d books with reading data on the Kindle (opened at least "
+                "once); matched %d (device %d, ASIN %d, title %d)%s; %d books updated "
+                "(source: %s)" % (len(books), matched, m.get("device", 0), m.get("asin", 0),
+                                  m.get("title", 0),
+                                  ("; " + ", ".join(skipped)) if skipped else "",
+                                  updated, used), 15000)
             _dbg("_import_done: status message shown (done)")
         except Exception as e:  # noqa
             import traceback
@@ -296,6 +306,26 @@ class KindleReadingAction(InterfaceAction):
             self.gui.status_bar.show_message("Kindle import: " + msg, 6000)
 
     # ------------------------------------------------------- write to library
+    def _device_matches(self, all_ids):
+        """{device_key: library book id} from calibre's matching of the books
+        on the connected device (book.application_id, set by calibre when it
+        matched the device book by UUID / APP_ID / title+author)."""
+        from calibre_plugins.kindle_reading.engine import device_key
+        out = {}
+        try:
+            booklists = self.gui.booklists() if self.gui.device_manager.is_device_connected else ()
+        except Exception as e:  # noqa
+            _dbg("_device_matches: %r" % e)
+            return out
+        for bl in booklists:
+            for book in (bl or ()):
+                bid = getattr(book, "application_id", None)
+                lpath = getattr(book, "lpath", None)
+                if lpath and getattr(book, "in_library", None) and bid in all_ids:
+                    out[device_key(lpath)] = bid
+        _dbg("_device_matches: %d device books matched by calibre" % len(out))
+        return out
+
     def _write_columns(self, books, restrict_ids=None):
         from calibre_plugins.kindle_reading.config import enabled_columns
         db = self.gui.current_db.new_api
@@ -312,47 +342,66 @@ class KindleReadingAction(InterfaceAction):
                              show=True)
             return 0, 0
 
-        # --- build match indexes over the Calibre library ---
-        by_asin, by_title = {}, {}
-        for bid in db.all_book_ids():
+        # --- match indexes over the Calibre library ---
+        all_ids = set(db.all_book_ids())
+        # 1) calibre's own device matching (UUID / APP_ID / author, the same
+        #    as the Device tab), keyed by the book file's path on the device
+        by_device = self._device_matches(all_ids)
+        # 2) ASIN identifiers; 3) title, used only when it is unambiguous
+        by_asin, by_title, authors_of = {}, {}, {}
+        for bid in all_ids:
             ids = db.field_for("identifiers", bid) or {}
             for k, v in ids.items():
                 if k in ("amazon", "mobi-asin") or k.startswith("amazon_"):
-                    by_asin[str(v)] = bid
-            t = db.field_for("title", bid) or ""
-            by_title.setdefault(_norm(t), bid)
+                    by_asin[str(v).upper()] = bid
+            by_title.setdefault(_norm(db.field_for("title", bid) or ""), []).append(bid)
+            names = set(db.field_for("authors", bid) or ())
+            names.add(db.field_for("author_sort", bid) or "")
+            authors_of[bid] = {_norm(a) for a in names if a}
 
         match_title = bool(prefs["match_by_title"])
-        # accumulate per-column {book_id: value}
         changes = {lookup: {} for lookup in colmap}
-        matched = 0
+        how = {"device": 0, "asin": 0, "title": 0}
+        unmatched = ambiguous = 0
         for b in books:
-            bid = None
-            if b.get("asin") and str(b["asin"]) in by_asin:
-                bid = by_asin[str(b["asin"])]
+            bid, method = None, None
+            key = b.get("device_key")
+            if key and key in by_device:
+                bid, method = by_device[key], "device"
+            elif b.get("asin") and str(b["asin"]).upper() in by_asin:
+                bid, method = by_asin[str(b["asin"]).upper()], "asin"
             elif match_title and b.get("norm_title") in by_title:
-                bid = by_title[b["norm_title"]]
+                cands = by_title[b["norm_title"]]
+                if len(cands) > 1 and b.get("author"):
+                    # same title more than once: the author has to decide
+                    cands = [c for c in cands if _norm(b["author"]) in authors_of[c]]
+                if len(cands) == 1:
+                    bid, method = cands[0], "title"
+                else:
+                    ambiguous += 1
+                    continue
             if bid is None:
+                unmatched += 1
                 continue
             if restrict_ids is not None and bid not in restrict_ids:
                 continue
-            matched += 1
+            how[method] += 1
             for lookup, field in colmap.items():
                 val = b.get(field)
-                if val is not None:
+                if val is not None and db.field_for(lookup, bid) != val:
                     changes[lookup][bid] = val
 
-        updated = 0
         changed_ids = set()
         for lookup, mp in changes.items():
             if not mp:
                 continue
             try:
                 db.set_field(lookup, mp)
-                updated += len(mp)
                 changed_ids.update(mp)
             except Exception as e:  # noqa  (e.g. a datetime value calibre rejects)
                 _dbg("_write_columns: set_field %s failed %r" % (lookup, e))
+        self._last_match = dict(how, unmatched=unmatched, ambiguous=ambiguous)
+        matched, updated = sum(how.values()), len(changed_ids)
         # Targeted refresh of only the changed rows. A full model().refresh()
         # here rebuilds the entire library view and, with a device connected,
         # re-runs on-device matching — slow enough to look like a freeze.

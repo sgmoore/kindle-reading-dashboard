@@ -145,7 +145,8 @@ class ConfigWidget(QWidget):
             grid.addWidget(e, i, 2)
         scroll.setWidget(inner)
         outer.addWidget(scroll)
-        self.match_by_title = QCheckBox("Match books by title when ASIN is unavailable")
+        self.match_by_title = QCheckBox("Also match by title when Calibre's device matching and ASIN find nothing "
+                                        "(only when the title is unambiguous)")
         self.match_by_title.setChecked(bool(prefs["match_by_title"]))
         outer.addWidget(self.match_by_title)
         self.auto_on_connect = QCheckBox("Import automatically when the Kindle connects")
