@@ -715,15 +715,17 @@ NO_KINDLE_MSG = (
     "No Kindle found. Connect the Kindle as a USB drive (or set its documents "
     "folder in Configure). Newer Kindles (Scribe 3, Colorsoft, 2024+ "
     "Paperwhite) connect over MTP instead: those are read through Calibre's own "
-    "device connection, which needs Calibre 7.25 or later. To pull data over "
-    "the network instead, set Source = ssh in Configure.")
+    "device connection, which needs Calibre 7.25 or later. A jailbroken Kindle "
+    "on USB networking is used automatically when its SSH host (Configure) "
+    "answers.")
 
 
 def sync(cache, cfg, source, progress=lambda *a: None):
     """Pull the device's data into `cache` (documents/ + cc.db/fmcache.db when
-    the source has them). Returns the source used. Never silently falls back
-    to SSH: SSH only runs when explicitly selected, so a disconnected device
-    gives a clear error instead of a hung/failed SSH attempt."""
+    the source has them). Returns the source used. `auto` prefers USB / MTP
+    and uses SSH only when no USB Kindle is found and the SSH port answers a
+    quick TCP probe, so a disconnected device gives a clear error instead of a
+    hung SSH attempt."""
     if source == "ssh":
         sync_ssh(cache, cfg, progress)
         return "ssh"
@@ -732,6 +734,10 @@ def sync(cache, cfg, source, progress=lambda *a: None):
         return "mtp"
     # usb / auto: locate the Kindle's documents folder (off the GUI thread)
     docs = resolve_usb_documents(cfg)
+    if not docs and source == "auto" and cfg.get("ssh_host") \
+            and ssh_reachable(cfg["ssh_host"]):
+        sync_ssh(cache, cfg, progress)
+        return "ssh"
     if not docs:
         raise RuntimeError(NO_KINDLE_MSG)
     sync_usb(docs, cache, progress)

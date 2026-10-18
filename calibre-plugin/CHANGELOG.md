@@ -8,7 +8,9 @@ the MobileRead "Version History" from the first line of each section.
 - SSH with a password now works without installing Python: Configure > "Install SSH support…" downloads paramiko and its libraries from PyPI into Calibre's config folder (one time, about 15 MB).
 - Clear message when Source = ssh with a password but SSH support is not installed.
 - On Windows, when the Kindle's USB network adapter got an automatic 169.254.x address, the "not reachable" message shows the exact command that fixes it.
-- "Import automatically when the Kindle connects" now also works with Source = ssh: the plugin checks every 10 seconds whether the Kindle answers over USB networking and imports when it appears.
+- Source = auto now also finds a Kindle on USB networking (SSH) when no USB / MTP Kindle is connected and the SSH host answers.
+- "Import automatically when the Kindle connects" now also works over SSH (Source = auto or ssh): the plugin checks every 10 seconds whether the Kindle answers and imports when it appears.
+- Open web dashboard no longer starts a second server each time on Windows (the old one kept running).
 - Open web dashboard no longer fails silently when the Kindle was read but nothing came back (e.g. password login without SSH support): it shows an error instead.
 
 ## 1.3.3

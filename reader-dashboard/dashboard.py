@@ -773,11 +773,24 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _Server(ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second server bind the same port, so the
+    # "already running" check below never fired and every launch left one
+    # more server running. Ask for exclusive use there instead.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        import socket
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def serve(port=8742):
     os.chdir(WEB)
     url = "http://127.0.0.1:%d/" % port
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        httpd = _Server(("127.0.0.1", port), Handler)
     except OSError:
         # a dashboard is already running on this port (it serves the same web/
         # folder, so it already has the library.json just built): reuse it

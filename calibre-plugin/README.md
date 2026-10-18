@@ -30,9 +30,9 @@ last-read date. Six are on by default.
 
 1. **Configure…** (button menu):
    - **Fields to import** — tick the fields you want; each row has the column lookup name. Click **Create missing columns…** to create the ticked ones, then restart Calibre so they show.
-   - **Data source**: `auto` (USB, with cc.db when present), `usb`, or `ssh`. Auto never silently SSHs — a disconnected device gives a clear message.
+   - **Data source**: `auto` (USB, with cc.db when present), `usb`, or `ssh`. Auto uses SSH only when no USB/MTP Kindle is found and the SSH host answers a quick port check, so a disconnected device gives a clear message instead of a hang.
    - **USB documents folder**: leave blank to auto-detect the connected Kindle; or set e.g. `E:/documents`.
-   - **SSH**: host / user / password / optional key. Used only when Source = ssh.
+   - **SSH**: host / user / password / optional key. Used when Source = ssh, or auto with no USB Kindle.
      **Install SSH support…** downloads paramiko from PyPI into Calibre's config
      folder (one time, ~15 MB, no separate Python), which password login needs.
    - **Import automatically when the Kindle connects** — runs the import a few seconds after the device mounts.

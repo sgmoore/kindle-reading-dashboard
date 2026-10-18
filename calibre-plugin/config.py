@@ -40,7 +40,7 @@ read / unread status as marked on the Kindle.<br><br>
 cc.db is not visible over USB on most Kindles. To get it you need a
 <a href="https://kindlemodding.org/jailbreaking/">jailbroken Kindle</a> with
 <a href="https://www.mobileread.com/forums/showthread.php?t=225030">USBNetwork (SSH)</a>:
-then either set Source = ssh, or copy both files to your computer once and
+then Source = auto or ssh reads it over the network, or copy both files to your computer once and
 pick them below. Copies are only read, never changed.<br><br>
 Nothing else needs to be installed: the web dashboard runs on Calibre's own
 Python. SSH with a password needs SSH support: click
@@ -130,7 +130,7 @@ class ConfigWidget(QWidget):
         v.addWidget(help_box)
 
         # ---- ssh ----
-        ssh_box = QGroupBox("SSH (usbnet) — only used when Source = ssh")
+        ssh_box = QGroupBox("SSH (usbnet) — used when Source = ssh, or auto with no USB Kindle")
         ef = _form(ssh_box)
         self.ssh_host = QLineEdit(prefs["ssh_host"])
         self.ssh_user = QLineEdit(prefs["ssh_user"])

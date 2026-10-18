@@ -64,7 +64,7 @@ class KindleReadingAction(InterfaceAction):
 
     # -------------------------------------- auto-import when SSH comes up
     def _install_ssh_watch(self):
-        """A Kindle on USB networking (Source = ssh) is not a calibre device,
+        """A Kindle on USB networking (Source = ssh / auto) is not a calibre device,
         so device_detected never fires for it. Probe its SSH port every few
         seconds instead (in a thread: the probe can take seconds) and import
         when it goes from unreachable to reachable."""
@@ -78,10 +78,12 @@ class KindleReadingAction(InterfaceAction):
         self._ssh_timer.start(10000)
 
     def _ssh_probe(self):
-        if self._ssh_probing or prefs["source"] != "ssh" \
+        if self._ssh_probing or prefs["source"] not in ("ssh", "auto") \
                 or not prefs["auto_on_connect"]:
-            if prefs["source"] != "ssh":
-                self._ssh_up = False
+            return
+        if prefs["source"] == "auto" and self._mtp_or_usb_connected():
+            # auto reads a connected USB / MTP Kindle; device_detected
+            # already imports for it
             return
         import threading
         from calibre_plugins.kindle_reading import engine
@@ -94,9 +96,16 @@ class KindleReadingAction(InterfaceAction):
             try:
                 up = engine.ssh_reachable(host, timeout=2)
             finally:
+                _dbg("ssh watch: %s reachable=%s" % (host, up))
                 done(up)
 
         threading.Thread(target=probe, daemon=True).start()
+
+    def _mtp_or_usb_connected(self):
+        try:
+            return bool(self.gui.device_manager.is_device_connected)
+        except Exception:  # noqa
+            return False
 
     def _ssh_probed(self, up):
         self._ssh_probing = False
