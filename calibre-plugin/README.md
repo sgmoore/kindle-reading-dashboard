@@ -33,6 +33,8 @@ last-read date. Six are on by default.
    - **Data source**: `auto` (USB, with cc.db when present), `usb`, or `ssh`. Auto never silently SSHs — a disconnected device gives a clear message.
    - **USB documents folder**: leave blank to auto-detect the connected Kindle; or set e.g. `E:/documents`.
    - **SSH**: host / user / password / optional key. Used only when Source = ssh.
+     **Install SSH support…** downloads paramiko from PyPI into Calibre's config
+     folder (one time, ~15 MB, no separate Python), which password login needs.
    - **Import automatically when the Kindle connects** — runs the import a few seconds after the device mounts.
    - **cc.db file / fmcache.db file** (optional): copies of the Kindle's
      `/var/local/cc.db` and `/mnt/us/system/fmcache/fmcache.db` from anywhere on
@@ -98,9 +100,17 @@ SSH (`192.168.15.244`) is unreachable, and the SSH fallback over the system
   **Calibre 7.25+**. Used automatically for `auto`/`usb` unless a USB
   documents folder is set.
 - **SSH (usbnet)** pulls everything, including modern "Mark as Read" state.
-- SSH uses **paramiko** if Calibre has it, otherwise the system **`ssh`**
-  binary (key-based / agent auth recommended — non-interactive password auth
-  via plain `ssh` is unreliable; prefer a key, or use paramiko).
+- SSH uses **paramiko** when available, otherwise the system **`ssh`** binary
+  (key file only: it runs non-interactively, so it cannot send a password).
+  Calibre's Python has no pip, so **Configure > Install SSH support…** fetches
+  the wheels for this Calibre's Python / OS / CPU from PyPI, checks their
+  sha256 and unpacks them into
+  `<calibre config>/plugins/kindle_reading_libs/<python>-<os>-<cpu>/`.
+  The folder name includes the Python version, so after a Calibre upgrade
+  that changes it, Configure offers to install again.
+- If the Kindle is unreachable over USB networking on Windows because the
+  adapter got an automatic `169.254.x` address, the error message shows the
+  `New-NetIPAddress` command (with the adapter's index) that fixes it.
 
 Decoding reuses the bundled `krds.py` parser, identical to the toolkit's.
 

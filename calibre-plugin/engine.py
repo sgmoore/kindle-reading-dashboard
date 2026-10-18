@@ -6,7 +6,8 @@ KRDS sidecars — AZW3 `.azw3f`/`.azw3r`, KFX `.yjf`/`.yjr`, MOBI `.mbs`/`.mbp1`
 to map onto Calibre books.
 
 Self-contained: only the Python standard library + the bundled `krds` parser.
-SSH uses paramiko when importable, otherwise shells out to the system `ssh`.
+SSH uses paramiko when importable (Configure can install it into calibre's
+config folder, see sshdeps.py), otherwise shells out to the system `ssh`.
 """
 import datetime
 import glob
@@ -20,7 +21,7 @@ import sqlite3
 import subprocess
 import sys
 
-from calibre_plugins.kindle_reading import krds
+from calibre_plugins.kindle_reading import krds, sshdeps
 
 # krds logs "Unknown data structure ..." at ERROR for every field it does not
 # model — harmless, but a flood across a library. Mute it (CRITICAL + a
@@ -203,6 +204,7 @@ class SSH(object):
         self.host, self.user, self.password, self.key = host, user, password, key
         self._c = None
         self._mode = None
+        sshdeps.activate()
         try:
             import paramiko  # noqa
             self._mode = "paramiko"
@@ -294,15 +296,61 @@ def ssh_reachable(host, timeout=2.5):
         return False
 
 
+def usbnet_hint(host):
+    """Windows often gives the Kindle's USB network (RNDIS) adapter an automatic
+    169.254.x address instead of one in the Kindle's subnet, so the Kindle is
+    unreachable. Detect that and return how to fix it ('' when not the case)."""
+    import socket
+    if os.name != "nt" or host.count(".") != 3:
+        return ""
+    try:
+        addrs = {ai[4][0] for ai in socket.getaddrinfo(
+            socket.gethostname(), None, socket.AF_INET)}
+    except OSError:
+        return ""
+    prefix = host.rsplit(".", 1)[0] + "."
+    if any(a.startswith(prefix) for a in addrs) or             not any(a.startswith("169.254.") for a in addrs):
+        return ""
+    idx = ""
+    try:
+        p = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-NetAdapter | ? { $_.InterfaceDescription -like '*RNDIS*' "
+             "-and $_.Status -eq 'Up' } | select -First 1).ifIndex"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15,
+            **_no_window_kwargs())
+        idx = p.stdout.decode("ascii", "ignore").strip()
+    except Exception:  # noqa
+        pass
+    pc_ip = prefix + ("1" if host.endswith(".201") else "201")
+    cmd = "New-NetIPAddress -InterfaceIndex %s -IPAddress %s -PrefixLength 24" % (
+        idx if idx.isdigit() else "<index>", pc_ip)
+    msg = ("\n\nThe Kindle's USB network adapter has no address in %s0/24 "
+           "(Windows gave it an automatic 169.254.x address). Fix it once, in "
+           "PowerShell run as Administrator:\n\n    %s" % (prefix, cmd))
+    if not idx.isdigit():
+        msg += ("\n\n(<index> = the ifIndex of the \"Kindle USB RNDIS\" adapter "
+                "in the output of Get-NetAdapter.)")
+    return msg
+
+
 def sync_ssh(cache, cfg, progress=lambda *a: None):
     if not ssh_reachable(cfg["ssh_host"]):
         raise RuntimeError(
             "SSH host %s:22 is not reachable. If the Kindle is plugged in as a "
             "USB drive, use the USB source instead (usbnet/SSH needs the device "
-            "configured for network, not mass-storage)." % cfg["ssh_host"])
+            "configured for network, not mass-storage)." % cfg["ssh_host"]
+            + usbnet_hint(cfg["ssh_host"]))
     docs = os.path.join(cache, "documents")
     os.makedirs(docs, exist_ok=True)
     ssh = SSH(cfg["ssh_host"], cfg["ssh_user"], cfg["ssh_password"], cfg["ssh_key"])
+    if ssh._mode == "binary" and not cfg["ssh_key"]:
+        # the system ssh runs with BatchMode (no prompts), so it cannot log in
+        # with a password
+        raise RuntimeError(
+            "SSH with a password needs SSH support. Open Configure and click "
+            "\"Install SSH support…\" (one-time download, no Python install "
+            "needed), or set a key file.")
     try:
         db = ssh.read_file(REMOTE_CCDB)
         if db:
@@ -326,6 +374,10 @@ def sync_ssh(cache, cfg, progress=lambda *a: None):
             progress(i, len(files))
     finally:
         ssh.close()
+    if not db and not files:
+        raise RuntimeError(
+            "Reached %s over SSH but read nothing (no cc.db, no reading files). "
+            "Check the SSH user and password in Configure." % cfg["ssh_host"])
 
 
 def sync_usb(documents, cache, progress=lambda *a: None):

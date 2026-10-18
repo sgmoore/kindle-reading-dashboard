@@ -59,7 +59,51 @@ class KindleReadingAction(InterfaceAction):
         # as restrict_ids to import_stats.
         self.qaction.triggered.connect(lambda checked=False: self.import_stats())
         self._install_device_hook()
+        self._install_ssh_watch()
         _dbg("genesis done")
+
+    # -------------------------------------- auto-import when SSH comes up
+    def _install_ssh_watch(self):
+        """A Kindle on USB networking (Source = ssh) is not a calibre device,
+        so device_detected never fires for it. Probe its SSH port every few
+        seconds instead (in a thread: the probe can take seconds) and import
+        when it goes from unreachable to reachable."""
+        from qt.core import QTimer
+        self._ssh_up = False
+        self._ssh_probing = False
+        # moves the probe result from the thread to the GUI thread
+        self._ssh_done = Dispatcher(self._ssh_probed)
+        self._ssh_timer = QTimer(self.gui)
+        self._ssh_timer.timeout.connect(self._ssh_probe)
+        self._ssh_timer.start(10000)
+
+    def _ssh_probe(self):
+        if self._ssh_probing or prefs["source"] != "ssh" \
+                or not prefs["auto_on_connect"]:
+            if prefs["source"] != "ssh":
+                self._ssh_up = False
+            return
+        import threading
+        from calibre_plugins.kindle_reading import engine
+        host = prefs["ssh_host"]
+        done = self._ssh_done
+        self._ssh_probing = True
+
+        def probe():
+            up = False
+            try:
+                up = engine.ssh_reachable(host, timeout=2)
+            finally:
+                done(up)
+
+        threading.Thread(target=probe, daemon=True).start()
+
+    def _ssh_probed(self, up):
+        self._ssh_probing = False
+        if up and not self._ssh_up:
+            _dbg("ssh watch: %s came up, auto-import" % prefs["ssh_host"])
+            self.import_stats(silent=True)
+        self._ssh_up = up
 
     # ---------------------------------------------- auto-import on connect
     def _install_device_hook(self):
@@ -467,7 +511,10 @@ class KindleReadingAction(InterfaceAction):
         else:
             shutil.rmtree(cache, ignore_errors=True)
             shutil.move(staging, cache)
-        has_sidecars = os.path.isdir(os.path.join(cache, "documents"))
+        # an empty documents/ (a sync that read nothing) is no data: the
+        # dashboard would exit with "nothing to build" in a hidden window
+        has_sidecars = any(files for _d, _s, files in
+                           os.walk(os.path.join(cache, "documents")))
         has_ccdb = bool(cfg.get("ccdb_path")) or os.path.isfile(os.path.join(cache, "cc.db"))
         if not (has_sidecars or has_ccdb):
             return error_dialog(

@@ -5,11 +5,11 @@ from calibre.utils.config import JSONConfig
 try:
     from qt.core import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
                          QComboBox, QLabel, QPushButton, QGroupBox, QGridLayout,
-                         QCheckBox, QScrollArea)
+                         QCheckBox, QScrollArea, QProgressDialog, QTimer, Qt)
 except ImportError:  # very old calibre
     from PyQt5.Qt import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
                           QComboBox, QLabel, QPushButton, QGroupBox, QGridLayout,
-                          QCheckBox, QScrollArea)
+                          QCheckBox, QScrollArea, QProgressDialog, QTimer, Qt)
 
 from calibre_plugins.kindle_reading.fields import (
     FIELDS, FIELD_LABEL, FIELD_DT, DEFAULT_COL, DEFAULT_ON)
@@ -41,7 +41,10 @@ cc.db is not visible over USB on most Kindles. To get it you need a
 then either set Source = ssh, or copy both files to your computer once and
 pick them below. Copies are only read, never changed.<br><br>
 Nothing else needs to be installed: the web dashboard runs on Calibre's own
-Python. Only a <i>custom</i> dashboard.py that syncs over SSH by itself needs
+Python. SSH with a password needs SSH support: click
+<i>Install SSH support…</i> in the SSH section (a one-time download from
+PyPI into Calibre's config folder, no Python install).
+Only a <i>custom</i> dashboard.py that syncs over SSH by itself needs
 <a href="https://www.python.org/downloads/">Python 3</a> with
 <code>pip install paramiko</code>.
 """
@@ -120,6 +123,16 @@ class ConfigWidget(QWidget):
         ef.addRow("Password", self.ssh_password)
         ef.addRow("Key file", self._with_browse(
             self.ssh_key, "Choose the SSH private key", filters=[]))
+        support = QWidget()
+        sh = QHBoxLayout(support)
+        sh.setContentsMargins(0, 0, 0, 0)
+        self.ssh_support = QLabel()
+        sh.addWidget(self.ssh_support, 1)
+        self.ssh_install = QPushButton("Install SSH support…")
+        self.ssh_install.clicked.connect(self._install_ssh)
+        sh.addWidget(self.ssh_install)
+        ef.addRow("SSH support", support)
+        self._show_ssh_support()
         v.addWidget(ssh_box)
 
         # ---- fields (checklist) ----
@@ -192,6 +205,70 @@ class ConfigWidget(QWidget):
 
         btn.clicked.connect(browse)
         return row
+
+    def _show_ssh_support(self):
+        from calibre_plugins.kindle_reading import sshdeps
+        ver = sshdeps.paramiko_version()
+        if ver:
+            self.ssh_support.setText("Installed (paramiko %s)" % ver)
+            self.ssh_install.setText("Reinstall…")
+        else:
+            self.ssh_support.setText("Not installed: password login will not work")
+            self.ssh_install.setText("Install SSH support…")
+
+    def _install_ssh(self):
+        import threading
+        import traceback
+        from calibre.gui2 import question_dialog, error_dialog, info_dialog
+        from calibre_plugins.kindle_reading import sshdeps
+        if not question_dialog(
+                self, "Install SSH support",
+                "Download paramiko and the libraries it needs (about 15 MB) "
+                "from PyPI (pypi.org) into Calibre's config folder?\n\n"
+                "Nothing is installed system-wide; delete the folder\n%s\n"
+                "to remove it." % sshdeps.lib_dir()):
+            return
+        dlg = QProgressDialog("Starting…", None, 0, 100, self)
+        dlg.setWindowTitle("Install SSH support")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.show()
+        state = {"msg": "Starting…", "frac": 0.0, "done": False, "err": None}
+
+        def work():
+            try:
+                sshdeps.install(lambda m, f: state.update(msg=m, frac=f))
+            except Exception as e:  # noqa
+                state["err"] = (str(e), traceback.format_exc())
+            finally:
+                state["done"] = True
+
+        def tick():
+            dlg.setLabelText(state["msg"])
+            dlg.setValue(int(state["frac"] * 100))
+            if not state["done"]:
+                return
+            self._install_timer.stop()
+            dlg.close()
+            self._show_ssh_support()
+            if state["err"]:
+                error_dialog(self, "Install failed",
+                             "Could not install SSH support: %s" % state["err"][0],
+                             det_msg=state["err"][1], show=True)
+            elif sshdeps.paramiko_version():
+                info_dialog(self, "SSH support installed",
+                            "SSH support is ready (paramiko %s). Set Source = ssh "
+                            "to use it." % sshdeps.paramiko_version(), show=True)
+            else:
+                error_dialog(self, "Install incomplete",
+                             "The files were installed but paramiko does not load "
+                             "yet. Restart Calibre and try again.", show=True)
+
+        self._install_timer = QTimer(self)
+        self._install_timer.timeout.connect(tick)
+        self._install_timer.start(150)
+        threading.Thread(target=work, daemon=True).start()
 
     def _create_columns(self):
         from calibre.gui2.ui import get_gui

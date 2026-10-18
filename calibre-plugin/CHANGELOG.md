@@ -4,6 +4,13 @@ One `## X.Y.Z` section per release. The release workflow uses the matching
 section as the GitHub release notes, and `tools/mobileread_update.py` builds
 the MobileRead "Version History" from the first line of each section.
 
+## 1.4.0
+- SSH with a password now works without installing Python: Configure > "Install SSH support…" downloads paramiko and its libraries from PyPI into Calibre's config folder (one time, about 15 MB).
+- Clear message when Source = ssh with a password but SSH support is not installed.
+- On Windows, when the Kindle's USB network adapter got an automatic 169.254.x address, the "not reachable" message shows the exact command that fixes it.
+- "Import automatically when the Kindle connects" now also works with Source = ssh: the plugin checks every 10 seconds whether the Kindle answers over USB networking and imports when it appears.
+- Open web dashboard no longer fails silently when the Kindle was read but nothing came back (e.g. password login without SSH support): it shows an error instead.
+
 ## 1.3.3
 - Books are matched to the library with Calibre's own device matching first (the same as the Device tab: UUID, application id, title + author), then ASIN, then title.
 - Title matching never guesses: if several library books share the title, the author must match too, otherwise the book is skipped.
