@@ -5,6 +5,12 @@ section as the GitHub release notes, and `tools/mobileread_update.py` builds
 the MobileRead "Version History" from the first line of each section.
 
 ## 1.4.0
+- Highlights with their text: the plugin reads the highlighted sentences and notes from the book file in your Calibre library (Calibre's own MOBI/KF8 reader, no KindleUnpack needed). They go into a new "Highlights text" column, and the web dashboard now shows them too.
+- New fields: Series (as on the Kindle, with its number), First read, Reading sessions.
+- New options: fill Calibre's own Series from the Kindle (only books without a series), and save the Kindle's ASIN as an amazon identifier (exact matching next time).
+- Read status is filled for USB / MTP Kindles too (no cc.db): an opened book is "reading" unless the Kindle marked it.
+- New menu item: Export reading stats to CSV (every field, plus the matched Calibre book).
+- The web dashboard's sync button now reads the Kindle again (USB or SSH) instead of only rebuilding the page.
 - SSH with a password now works without installing Python: Configure > "Install SSH support…" downloads paramiko and its libraries from PyPI into Calibre's config folder (one time, about 15 MB).
 - Clear message when Source = ssh with a password but SSH support is not installed.
 - On Windows, when the Kindle's USB network adapter got an automatic 169.254.x address, the "not reachable" message shows the exact command that fixes it.

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """The toolbar action: Import reading stats / Open dashboard / Configure."""
+import json
 import os
 import shutil
 import subprocess
@@ -53,6 +54,7 @@ class KindleReadingAction(InterfaceAction):
         m.addAction("Show stats in Book Details (device + library)",
                     self.enable_book_details)
         m.addAction("Open web dashboard", self.open_dashboard)
+        m.addAction("Export reading stats to CSV…", self.export_csv)
         m.addSeparator()
         m.addAction("Configure…", self.show_config)
         # NB: triggered emits a `checked` bool — swallow it so it is not passed
@@ -233,6 +235,18 @@ class KindleReadingAction(InterfaceAction):
         cfg["dev_prefixes"] = self._device_prefixes()
         return cfg
 
+    def _matcher(self):
+        """Library matcher, built in the GUI thread (device book lists)."""
+        from calibre_plugins.kindle_reading.matching import Matcher
+        try:
+            booklists = (self.gui.booklists()
+                         if self.gui.device_manager.is_device_connected else ())
+        except Exception as e:  # noqa
+            _dbg("_matcher: booklists %r" % e)
+            booklists = ()
+        return Matcher(self.gui.current_db.new_api, booklists,
+                       match_title=bool(prefs["match_by_title"]))
+
     def _mtp_device(self, cfg, source):
         """The connected MTP Kindle to read from, or None (USB/SSH path)."""
         if source == "ssh" or cfg["usb_pref"]:
@@ -280,10 +294,12 @@ class KindleReadingAction(InterfaceAction):
             "Reading Kindle sidecars over MTP…", 3000)
 
     def _start_import_job(self, cfg, source, restrict_ids, silent, cache=None):
+        from calibre_plugins.kindle_reading.config import field_on
+        cfg["want_highlights"] = field_on("highlights")
         job = ThreadedJob(
             "kindle_reading_import",
             "Importing Kindle reading metadata",
-            self._do_import, (cfg, source, cache), {},
+            self._do_import, (cfg, source, cache, self._matcher()), {},
             # ThreadedJob calls its callback in the worker thread; Dispatcher
             # moves it to the GUI thread (it writes the library and the UI)
             Dispatcher(self._import_done))
@@ -295,8 +311,8 @@ class KindleReadingAction(InterfaceAction):
         _dbg("import_stats: job submitted (returning to event loop)")
         self.gui.status_bar.show_message("Importing Kindle reading metadata…", 3000)
 
-    def _do_import(self, cfg, source, cache=None, notifications=None, abort=None,
-                   log=None):
+    def _do_import(self, cfg, source, cache=None, matcher=None, notifications=None,
+                   abort=None, log=None):
         """Runs in a worker thread: sync + decode. Returns the book list.
         `cache` is pre-filled when the sidecars came over MTP."""
         _dbg("_do_import: worker start (source=%s)" % source)
@@ -309,6 +325,14 @@ class KindleReadingAction(InterfaceAction):
 
         try:
             books, used = engine.collect(cache, cfg, source, progress)
+            books = [b for b in books if b.get("has_data")]
+            from calibre_plugins.kindle_reading.matching import add_highlights
+            for b in books:
+                b["bid"], b["method"] = matcher.match(b)
+            if cfg.get("want_highlights"):
+                # needs the cache (sidecars) and the library's book file
+                n = add_highlights(books, matcher, log=_dbg)
+                _dbg("_do_import: highlight text for %d books" % n)
         finally:
             shutil.rmtree(cache, ignore_errors=True)
         _dbg("_do_import: worker done (%d books, via %s)" % (len(books), used))
@@ -325,7 +349,7 @@ class KindleReadingAction(InterfaceAction):
                     getattr(job, "traceback", "") or "", silent)
                 return
             result = job.result or {}
-            books = [b for b in result.get("books", []) if b.get("has_data")]
+            books = result.get("books", [])
             used = result.get("source", "?")
             matched, updated = self._write_columns(books, restrict_ids=restrict)
             _dbg("_import_done: wrote columns matched=%d updated=%d"
@@ -350,6 +374,84 @@ class KindleReadingAction(InterfaceAction):
             import traceback
             _dbg("_import_done: EXCEPTION %r\n%s" % (e, traceback.format_exc()))
 
+    # ------------------------------------------------------------ CSV export
+    def export_csv(self):
+        """Read the Kindle and save one row per book (every field, plus the
+        matched calibre book) as CSV."""
+        from calibre.gui2 import choose_save_file
+        path = choose_save_file(self.gui, "kindle-reading-csv", "Export reading stats",
+                                filters=[("CSV", ["csv"])], all_files=False,
+                                initial_filename="kindle_reading.csv")
+        if not path:
+            return
+        cfg, source = self._cfg(), prefs["source"]
+        matcher = self._matcher()
+        cache = tempfile.mkdtemp(prefix="kindle_reading_csv_")
+
+        def run(job=None):
+            if job is not None:
+                if job.failed:
+                    shutil.rmtree(cache, ignore_errors=True)
+                    return self._report_failure(str(getattr(job, "exception", "")
+                                                    or "MTP fetch failed."), "", False)
+                cfg["mtp_synced"] = True
+            self.gui.job_manager.run_threaded_job(ThreadedJob(
+                "kindle_reading_csv", "Export Kindle reading stats",
+                self._do_export, (cfg, source, cache, matcher, path), {},
+                Dispatcher(self._export_done)))
+
+        dev = self._mtp_device(cfg, source)
+        if dev is None:
+            return run()
+        from calibre_plugins.kindle_reading import engine
+        self.gui.device_manager.create_job(
+            engine.sync_mtp, run, "Kindle reading: read the Kindle for the CSV",
+            args=[dev, cache, cfg["include_deleted"]])
+
+    def _do_export(self, cfg, source, cache, matcher, path, notifications=None,
+                   abort=None, log=None):
+        import csv
+        from calibre_plugins.kindle_reading import engine
+        try:
+            books, used = engine.collect(cache, cfg, source)
+        finally:
+            shutil.rmtree(cache, ignore_errors=True)
+        db = matcher.db
+        cols = ["title", "author", "asin", "calibre_id", "calibre_title", "matched_by",
+                "status", "progress", "page", "hours", "minutes", "wpm", "wpm_overall",
+                "words", "book_words", "annotations", "first_read", "last_read",
+                "sessions", "series", "series_index"]
+        rows = []
+        for b in books:
+            if not b.get("has_data"):
+                continue
+            bid, method = matcher.match(b)
+            ser = b.get("series") or (None, None)
+            row = dict((k, b.get(k)) for k in cols if k in b)
+            row.update(calibre_id=bid, matched_by=method if bid is not None else "",
+                       calibre_title=db.field_for("title", bid) if bid is not None else "",
+                       series=ser[0], series_index=ser[1])
+            for k in ("first_read", "last_read"):
+                if row.get(k):
+                    row[k] = row[k].isoformat()
+            rows.append(row)
+        # utf-8 with BOM so Excel shows Hebrew titles correctly
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        return {"path": path, "rows": len(rows), "source": used}
+
+    def _export_done(self, job):
+        if job.failed:
+            return self._report_failure(str(getattr(job, "exception", "")
+                                            or "Export failed."),
+                                        getattr(job, "traceback", "") or "", False)
+        r = job.result or {}
+        self.gui.status_bar.show_message(
+            "Kindle reading stats: %d books saved to %s (source: %s)"
+            % (r.get("rows", 0), r.get("path"), r.get("source")), 15000)
+
     def _report_failure(self, msg, det, silent):
         _dbg("import failed: %s" % msg[:80])
         # auto-on-connect for a non-Kindle device shouldn't nag
@@ -360,26 +462,6 @@ class KindleReadingAction(InterfaceAction):
             self.gui.status_bar.show_message("Kindle import: " + msg, 6000)
 
     # ------------------------------------------------------- write to library
-    def _device_matches(self, all_ids):
-        """{device_key: library book id} from calibre's matching of the books
-        on the connected device (book.application_id, set by calibre when it
-        matched the device book by UUID / APP_ID / title+author)."""
-        from calibre_plugins.kindle_reading.engine import device_key
-        out = {}
-        try:
-            booklists = self.gui.booklists() if self.gui.device_manager.is_device_connected else ()
-        except Exception as e:  # noqa
-            _dbg("_device_matches: %r" % e)
-            return out
-        for bl in booklists:
-            for book in (bl or ()):
-                bid = getattr(book, "application_id", None)
-                lpath = getattr(book, "lpath", None)
-                if lpath and getattr(book, "in_library", None) and bid in all_ids:
-                    out[device_key(lpath)] = bid
-        _dbg("_device_matches: %d device books matched by calibre" % len(out))
-        return out
-
     def _write_columns(self, books, restrict_ids=None):
         from calibre_plugins.kindle_reading.config import enabled_columns
         db = self.gui.current_db.new_api
@@ -396,54 +478,51 @@ class KindleReadingAction(InterfaceAction):
                              show=True)
             return 0, 0
 
-        # --- match indexes over the Calibre library ---
-        all_ids = set(db.all_book_ids())
-        # 1) calibre's own device matching (UUID / APP_ID / author, the same
-        #    as the Device tab), keyed by the book file's path on the device
-        by_device = self._device_matches(all_ids)
-        # 2) ASIN identifiers; 3) title, used only when it is unambiguous
-        by_asin, by_title, authors_of = {}, {}, {}
-        for bid in all_ids:
-            ids = db.field_for("identifiers", bid) or {}
-            for k, v in ids.items():
-                if k in ("amazon", "mobi-asin") or k.startswith("amazon_"):
-                    by_asin[str(v).upper()] = bid
-            by_title.setdefault(_norm(db.field_for("title", bid) or ""), []).append(bid)
-            names = set(db.field_for("authors", bid) or ())
-            names.add(db.field_for("author_sort", bid) or "")
-            authors_of[bid] = {_norm(a) for a in names if a}
-
-        match_title = bool(prefs["match_by_title"])
         changes = {lookup: {} for lookup in colmap}
         how = {"device": 0, "asin": 0, "title": 0}
         unmatched = ambiguous = 0
+        fill_series = bool(prefs["fill_series"])
+        save_asin = bool(prefs["save_asin"])
+        series_set, series_idx, ident_set = {}, {}, {}
+        from calibre_plugins.kindle_reading.matching import ASIN_RE
         for b in books:
-            bid, method = None, None
-            key = b.get("device_key")
-            if key and key in by_device:
-                bid, method = by_device[key], "device"
-            elif b.get("asin") and str(b["asin"]).upper() in by_asin:
-                bid, method = by_asin[str(b["asin"]).upper()], "asin"
-            elif match_title and b.get("norm_title") in by_title:
-                cands = by_title[b["norm_title"]]
-                if len(cands) > 1 and b.get("author"):
-                    # same title more than once: the author has to decide
-                    cands = [c for c in cands if _norm(b["author"]) in authors_of[c]]
-                if len(cands) == 1:
-                    bid, method = cands[0], "title"
-                else:
-                    ambiguous += 1
-                    continue
+            bid, method = b.get("bid"), b.get("method")
             if bid is None:
-                unmatched += 1
+                if method == "ambiguous":
+                    ambiguous += 1
+                else:
+                    unmatched += 1
                 continue
             if restrict_ids is not None and bid not in restrict_ids:
                 continue
             how[method] += 1
             for lookup, field in colmap.items():
                 val = b.get(field)
-                if val is not None and db.field_for(lookup, bid) != val:
+                if val is None:
+                    continue
+                if field == "series":           # (name, index) -> series column
+                    name, idx = val
+                    if (db.field_for(lookup, bid) != name
+                            or db.field_for(lookup + "_index", bid) != idx):
+                        changes[lookup][bid] = name
+                        changes.setdefault(lookup + "_index", {})[bid] = idx
+                elif db.field_for(lookup, bid) != val:
                     changes[lookup][bid] = val
+            # calibre's own Series, only where it is still empty
+            if fill_series and b.get("series") and not db.field_for("series", bid):
+                series_set[bid], series_idx[bid] = b["series"]
+            # the Kindle's ASIN as an amazon identifier, for exact matching
+            asin = str(b.get("asin") or "").upper()
+            if save_asin and method != "asin" and ASIN_RE.match(asin):
+                ids = dict(db.field_for("identifiers", bid) or {})
+                if not ids.get("amazon"):
+                    ids["amazon"] = asin
+                    ident_set[bid] = ids
+        if series_set:
+            changes["series"] = series_set
+            changes["series_index"] = series_idx
+        if ident_set:
+            changes["identifiers"] = ident_set
 
         changed_ids = set()
         for lookup, mp in changes.items():
@@ -490,26 +569,45 @@ class KindleReadingAction(InterfaceAction):
                                 "dashboard: %s" % e, show=True)
         cfg, source = self._cfg(), prefs["source"]
         staging = tempfile.mkdtemp(prefix="kindle_reading_dash_")
+        matcher = self._matcher()
+        done = Dispatcher(lambda job: self._dashboard_synced(job, dash_dir, staging, cfg))
         dev = self._mtp_device(cfg, source)
         if dev is not None:
             from calibre_plugins.kindle_reading import engine
+
+            def fetched(job):
+                if job.failed:
+                    return self._dashboard_synced(job, dash_dir, staging, cfg)
+                cfg["mtp_synced"] = True
+                self.gui.job_manager.run_threaded_job(ThreadedJob(
+                    "kindle_reading_dashboard", "Highlight text for the dashboard",
+                    self._dashboard_sync, (cfg, source, staging, matcher), {}, done))
+
             self.gui.device_manager.create_job(
-                engine.sync_mtp,
-                lambda job: self._dashboard_synced(job, dash_dir, staging, cfg),
+                engine.sync_mtp, fetched,
                 "Kindle reading: read the Kindle for the dashboard",
                 args=[dev, staging, cfg["include_deleted"]])
         else:
-            job = ThreadedJob(
+            self.gui.job_manager.run_threaded_job(ThreadedJob(
                 "kindle_reading_dashboard", "Reading the Kindle for the dashboard",
-                self._dashboard_sync, (cfg, source, staging), {},
-                Dispatcher(lambda job: self._dashboard_synced(job, dash_dir, staging, cfg)))
-            self.gui.job_manager.run_threaded_job(job)
+                self._dashboard_sync, (cfg, source, staging, matcher), {}, done))
         self.gui.status_bar.show_message("Reading the Kindle for the dashboard…", 4000)
 
-    def _dashboard_sync(self, cfg, source, staging, notifications=None, abort=None,
-                        log=None):
+    def _dashboard_sync(self, cfg, source, staging, matcher, notifications=None,
+                        abort=None, log=None):
+        """Worker: read the Kindle (unless MTP already did), then save the
+        text of every highlighted book in the library next to its sidecars,
+        so the dashboard shows the highlighted sentences."""
         from calibre_plugins.kindle_reading import engine
-        return engine.sync(staging, cfg, source)
+        from calibre_plugins.kindle_reading.matching import add_highlights
+        used = engine.sync(staging, cfg, source)
+        try:
+            books, _ = engine._build(staging, used)
+            n = add_highlights(books, matcher, want_html=False, write_dat=True, log=_dbg)
+            _dbg("_dashboard_sync: highlight text for %d books" % n)
+        except Exception as e:  # noqa  (text is a bonus; never block the dashboard)
+            _dbg("_dashboard_sync: highlight text failed %r" % e)
+        return used
 
     def _dashboard_synced(self, job, dash_dir, staging, cfg):
         """Swap the fresh data in (only if the read worked: a disconnected
@@ -536,6 +634,16 @@ class KindleReadingAction(InterfaceAction):
         args = ["serve", "--no-sync", "--cache", cache]
         if cfg.get("include_deleted"):
             args.append("--include-deleted")
+        if not cfg.get("mtp_synced"):
+            # the page's sync button reads the Kindle again with this plugin's
+            # engine (MTP cannot: only calibre's device thread may talk to it)
+            conf = os.path.join(dash_dir, "plugin_sync.json")
+            try:
+                with open(conf, "w", encoding="utf-8") as f:
+                    json.dump({"cfg": cfg, "source": prefs["source"]}, f)
+                args += ["--plugin-sync", conf]
+            except (OSError, TypeError) as e:
+                _dbg("plugin_sync.json: %r" % e)
         for key, opt in (("ccdb_path", "--ccdb"), ("fmcache_path", "--fmcache")):
             if cfg.get(key) and os.path.isfile(cfg[key]):
                 args += [opt, cfg[key]]
@@ -589,10 +697,6 @@ class KindleReadingAction(InterfaceAction):
                 "Launching dashboard… a browser tab will open.", 5000)
         except Exception as e:  # noqa
             error_dialog(self.gui, "Launch failed", str(e), show=True)
-
-
-def _norm(s):
-    return "".join(ch for ch in (s or "").lower() if ch.isalnum())
 
 
 def _dashboard_command(path, args, prefer_calibre=False):

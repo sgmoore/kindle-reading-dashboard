@@ -53,6 +53,8 @@ Only a <i>custom</i> dashboard.py that syncs over SSH by itself needs
 """
 prefs.defaults["match_by_title"] = True
 prefs.defaults["auto_on_connect"] = False   # import automatically when device connects
+prefs.defaults["fill_series"] = False       # Kindle series -> calibre Series when empty
+prefs.defaults["save_asin"] = False         # Kindle ASIN -> amazon identifier when missing
 # per-field enable + column lookup name, keyed by field key
 prefs.defaults["field_on"] = dict(DEFAULT_ON)
 prefs.defaults["field_col"] = dict(DEFAULT_COL)
@@ -187,6 +189,14 @@ class ConfigWidget(QWidget):
         self.auto_on_connect = QCheckBox("Import automatically when the Kindle connects")
         self.auto_on_connect.setChecked(bool(prefs["auto_on_connect"]))
         outer.addWidget(self.auto_on_connect)
+        self.fill_series = QCheckBox("Fill Calibre's own Series from the Kindle's series "
+                                     "(only books with no series yet)")
+        self.fill_series.setChecked(bool(prefs["fill_series"]))
+        outer.addWidget(self.fill_series)
+        self.save_asin = QCheckBox("Save the Kindle's ASIN as an amazon identifier when the "
+                                   "book has none (exact matching next time)")
+        self.save_asin.setChecked(bool(prefs["save_asin"]))
+        outer.addWidget(self.save_asin)
         create = QPushButton("Create missing columns…")
         create.clicked.connect(self._create_columns)
         outer.addWidget(create)
@@ -346,6 +356,8 @@ class ConfigWidget(QWidget):
         prefs["include_deleted"] = bool(self.include_deleted.isChecked())
         prefs["match_by_title"] = bool(self.match_by_title.isChecked())
         prefs["auto_on_connect"] = bool(self.auto_on_connect.isChecked())
+        prefs["fill_series"] = bool(self.fill_series.isChecked())
+        prefs["save_asin"] = bool(self.save_asin.isChecked())
         on, cols = {}, {}
         for key, *_ in FIELDS:
             on[key] = bool(self.field_checks[key].isChecked())

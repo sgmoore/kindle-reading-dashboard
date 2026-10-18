@@ -172,7 +172,8 @@ def _asin_from_info(azw3f):
 #  fmcache.db (modern read-state)  — SSH only (not on USB partition)
 # --------------------------------------------------------------------------- #
 def load_fmcache(path):
-    out = {"read_state": {}}
+    """{read_state: {asin: READ/UNREAD}, sessions: {asin: [start ms, ...]}}"""
+    out = {"read_state": {}, "sessions": {}}
     if not path or not os.path.exists(path):
         return out
     try:
@@ -192,7 +193,46 @@ def load_fmcache(path):
                 out["read_state"][asin] = d.get("read_state")   # READ / UNREAD
     except (sqlite3.Error, ValueError):
         pass
+    # device reading sessions (the same table the dashboard shows)
+    try:
+        for (sess,) in cur.execute("SELECT session FROM reading_sessions"):
+            p = json.loads(sess).get("payload", {})
+            if p.get("asin") and p.get("start_timestamp"):
+                out["sessions"].setdefault(p["asin"], []).append(p["start_timestamp"])
+    except (sqlite3.Error, ValueError, AttributeError):
+        pass
     con.close()
+    return out
+
+
+def load_series(cur):
+    """{cdeKey: (series name, index)} from cc.db's Series table. The index is
+    the position label when it is a number ("2"), else position + 1."""
+    names = {}
+    try:
+        for key, group, title in cur.execute(
+                "SELECT p_cdeKey, p_cdeGroup, p_titles_0_nominal FROM Entries "
+                "WHERE p_type='Entry:Item:Series'"):
+            for k in (key, group):
+                if k:
+                    names[k] = title
+    except sqlite3.Error:
+        return {}
+    out = {}
+    try:
+        for item, sid, pos, label in cur.execute(
+                "SELECT d_itemCdeKey, d_seriesId, d_itemPosition, "
+                "d_itemPositionLabel FROM Series"):
+            name = names.get(sid)
+            if not (item and name):
+                continue
+            try:
+                idx = float(label)
+            except (TypeError, ValueError):
+                idx = float(pos) + 1 if pos is not None else 1.0
+            out[item] = (name, idx)
+    except sqlite3.Error:
+        pass
     return out
 
 
@@ -641,8 +681,35 @@ def device_key(path):
     return p.lower()
 
 
+def _first_read(sessions, azw3f):
+    """Earliest reading session on the device (fmcache), else the earliest
+    entry of the book's page history."""
+    times = [t for t in (sessions or []) if t]
+    ph = azw3f.get("page.history.store")
+    if isinstance(ph, list):
+        for e in ph:
+            if isinstance(e, dict) and e.get("time"):
+                times.append(e["time"])
+    dts = [d for d in (_to_datetime(t) for t in times) if d]
+    return min(dts) if dts else None
+
+
+def annotations_raw(azw3r):
+    """annotation.cache.object flattened to [{type, startPosition, ...}]
+    (the same shape as azw3text/extract_highlights.annotations_from_azw3r)."""
+    out = []
+    aco = (azw3r or {}).get("annotation.cache.object")
+    if isinstance(aco, dict):
+        for cls, items in aco.items():
+            if isinstance(items, list):
+                out += [dict(it, type=cls.split(".")[-1]) for it in items
+                        if isinstance(it, dict)]
+    return out
+
+
 def _book_from_sidecars(azw3f, azw3r, title, author, asin, read_status,
-                        cc_last_access=None, cc_percent=None, sdr_key=None):
+                        cc_last_access=None, cc_percent=None, sdr_key=None,
+                        series=None, sessions=None, sdr_dir=None):
     stats = _stats_from_timer(azw3f.get("timer.model"), azw3f.get("book.info.store"))
     pos = _furthest_position(azw3f)
     pg = _page_of(azw3r, pos)
@@ -665,8 +732,14 @@ def _book_from_sidecars(azw3f, azw3r, title, author, asin, read_status,
         "words": stats.get("words_read"),
         "book_words": stats.get("book_words") or None,
         "annotations": _annotations_count(azw3r),
-        "status": read_status,
+        # no mark on the device (no cc.db / fmcache): opened = reading
+        "status": read_status or ("reading" if pct else "unread"),
         "last_read": _last_read(azw3f, cc_last_access),
+        "first_read": _first_read(sessions, azw3f),
+        "sessions": len(sessions) if sessions else None,
+        "series": series,                # (name, index) from cc.db, or None
+        "annots_raw": annotations_raw(azw3r),
+        "sdr_dir": sdr_dir,              # cache folder, for highlight text
         "has_data": bool(azw3f.get("timer.model") or azw3r),
     }
 
@@ -682,11 +755,19 @@ def build_from_ccdb(cache):
     cur = con.cursor()
     cols = [d[1] for d in cur.execute("PRAGMA table_info(Entries)")]
     rows = cur.execute("SELECT * FROM Entries WHERE p_type='Entry:Item'").fetchall()
+    series = load_series(cur)
     books, used_sdr = [], set()
+    # every location cc.db knows, of any type (dictionaries, My Clippings):
+    # their .sdr folders must not come back as sidecar-only books
+    for (loc,) in cur.execute("SELECT p_location FROM Entries "
+                              "WHERE p_location LIKE '/mnt/us/%'"):
+        base = os.path.splitext(loc[len("/mnt/us/"):])[0]
+        used_sdr.add(os.path.normcase(os.path.normpath(
+            os.path.join(cache, *(base + ".sdr").split("/")))))
     for row in rows:
         r = {k: row[k] for k in cols}
         loc = r.get("p_location") or ""
-        azw3f, azw3r = {}, {}
+        azw3f, azw3r, sdr = {}, {}, None
         key = device_key(loc[len("/mnt/us/"):]) if loc.startswith("/mnt/us/") else None
         if loc.startswith("/mnt/us/"):
             base, _ = os.path.splitext(loc[len("/mnt/us/"):])
@@ -714,7 +795,8 @@ def build_from_ccdb(cache):
             azw3f, azw3r,
             r.get("p_titles_0_nominal") or "", _author(r),
             cde, status, cc_last_access=r.get("p_lastAccess"),
-            cc_percent=r.get("p_percentFinished"), sdr_key=key))
+            cc_percent=r.get("p_percentFinished"), sdr_key=key,
+            series=series.get(cde), sessions=fm["sessions"].get(cde), sdr_dir=sdr))
     con.close()
     return books + build_from_usb(cache, skip=used_sdr)
 
@@ -724,7 +806,8 @@ def build_from_usb(cache, skip=()):
     book.info.store when present. Read status only when an fmcache.db is
     available (synced, or a copy set in Configure)."""
     docs = os.path.join(cache, "documents")
-    fm_rs = load_fmcache(os.path.join(cache, "fmcache.db"))["read_state"]
+    fm = load_fmcache(os.path.join(cache, "fmcache.db"))
+    fm_rs = fm["read_state"]
     books = []
     for dirpath, _dirs, files in os.walk(docs):
         f3 = [f for f in files if f.endswith(METRICS_EXTS)]
@@ -751,7 +834,8 @@ def build_from_usb(cache, skip=()):
         status = {"READ": "read", "UNREAD": "unread"}.get(fm_rs.get(asin))
         books.append(_book_from_sidecars(
             azw3f, azw3r, title, author, asin, status,
-            sdr_key=device_key(os.path.relpath(dirpath, cache))))
+            sdr_key=device_key(os.path.relpath(dirpath, cache)),
+            sessions=fm["sessions"].get(asin), sdr_dir=dirpath))
     return books
 
 

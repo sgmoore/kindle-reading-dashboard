@@ -221,6 +221,35 @@ def sync_ssh():
     print("sync complete -> %s" % CACHE)
 
 
+def sync_plugin(conf_path):
+    """Started from the Calibre plugin (--plugin-sync): read the Kindle again
+    with the plugin's own engine (this runs on calibre's Python, calibre-debug),
+    so the page's sync button works like Calibre's "Open web dashboard".
+    The book text calibre made for highlights is kept (it needs the library,
+    which only the Calibre GUI has open)."""
+    import shutil
+    import tempfile
+    with open(conf_path, encoding="utf-8") as f:
+        conf = json.load(f)
+    from calibre.customize.ui import initialized_plugins
+    initialized_plugins()
+    from calibre_plugins.kindle_reading import engine
+    staging = tempfile.mkdtemp(prefix="kindle_reading_dash_")
+    try:
+        engine.sync(staging, conf["cfg"], conf["source"])
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    for dirpath, _dirs, files in os.walk(DOCS_CACHE):
+        if "assembled_text.dat" in files:
+            dst = os.path.join(staging, os.path.relpath(dirpath, CACHE))
+            if os.path.isdir(dst):
+                shutil.copy2(os.path.join(dirpath, "assembled_text.dat"), dst)
+    shutil.rmtree(CACHE, ignore_errors=True)
+    shutil.move(staging, CACHE)
+    print("synced via the Calibre plugin -> %s" % CACHE)
+
+
 def sync_local(docs):
     """Mirror cc.db + sidecars from a locally-mounted Kindle (e.g. D:/documents)."""
     import shutil
@@ -829,6 +858,8 @@ class Handler(SimpleHTTPRequestHandler):
                 mode, local = Handler.sync_mode
                 if mode == "ssh":
                     sync_ssh()
+                elif mode == "plugin":
+                    sync_plugin(local)
                 elif mode == "local" and local:
                     sync_local(local)
                 build()                 # mode "none": data is synced by the caller
@@ -889,6 +920,8 @@ def main():
     ap.add_argument("--local", metavar="DOCS_DIR",
                     help="read sidecars from a local/USB documents folder instead of SSH")
     ap.add_argument("--no-sync", action="store_true", help="skip syncing, reuse cache")
+    ap.add_argument("--plugin-sync", metavar="JSON",
+                    help="(Calibre plugin) settings for the page's sync button")
     ap.add_argument("--port", type=int, default=8742)
     ap.add_argument("--cache", metavar="DIR", help="folder for synced files (default ./cache)")
     ap.add_argument("--ccdb", metavar="PATH",
@@ -913,6 +946,8 @@ def main():
 
     if args.local:
         mode = ("local", args.local)
+    elif args.plugin_sync:
+        mode = ("plugin", args.plugin_sync)   # button: read the Kindle via calibre
     elif args.no_sync:
         mode = ("none", None)            # the page's refresh button only rebuilds
     else:

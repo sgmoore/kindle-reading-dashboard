@@ -51,8 +51,34 @@ last-read date. Six are on by default.
    MTP or SSH), then opens the dashboard that ships inside the plugin in your
    browser. Nothing to install: it runs on Calibre's own Python. If the Kindle
    is not connected, the last data read is shown.
+   The page's sync button reads the Kindle again (USB or SSH; over MTP reopen
+   it from Calibre). Highlights show their text for books whose AZW3 / MOBI is
+   in your library.
 3. **Import reading stats (all books)** — syncs, decodes, matches to your library, writes the enabled columns.
 4. **Refresh selected book(s)** — same, but only updates the rows you have selected in the library.
+5. **Export reading stats to CSV…** — every field for every book read on the
+   Kindle, plus the matched Calibre book (UTF-8, opens in Excel).
+
+### Highlights text
+
+The Kindle stores highlights only as positions in the book. The plugin reads
+the book from your Calibre library (AZW3 / AZW / MOBI, with Calibre's own
+reader, nothing to install) and turns the positions into the highlighted
+sentences, with your notes, for the **Highlights text** column and the
+dashboard. The library file must be the one that is on the Kindle (sent from
+Calibre); a different edition gives the wrong text. KFX and DRM books have no
+text.
+
+### More fields and options
+
+- **Series (on the Kindle)**: the series and number from the Kindle's library
+  (e.g. set with Kindle Series Manager), as a Calibre series column.
+  *Fill Calibre's own Series* copies it into Calibre's Series for books that
+  have none.
+- **First read** / **Reading sessions**: from the Kindle's reading sessions
+  (fmcache.db) and the book's page history.
+- *Save the Kindle's ASIN as an amazon identifier*: books matched by device
+  or title get the ASIN, so later imports match them exactly.
 
 ## How matching works
 
