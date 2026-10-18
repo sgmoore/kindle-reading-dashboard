@@ -6,7 +6,8 @@ KRDS sidecars — AZW3 `.azw3f`/`.azw3r`, KFX `.yjf`/`.yjr`, MOBI `.mbs`/`.mbp1`
 to map onto Calibre books.
 
 Self-contained: only the Python standard library + the bundled `krds` parser.
-SSH uses paramiko when importable, otherwise shells out to the system `ssh`.
+SSH uses paramiko when importable (Configure can install it into calibre's
+config folder, see sshdeps.py), otherwise shells out to the system `ssh`.
 """
 import datetime
 import glob
@@ -20,7 +21,7 @@ import sqlite3
 import subprocess
 import sys
 
-from calibre_plugins.kindle_reading import krds
+from calibre_plugins.kindle_reading import krds, sshdeps
 
 # krds logs "Unknown data structure ..." at ERROR for every field it does not
 # model — harmless, but a flood across a library. Mute it (CRITICAL + a
@@ -171,7 +172,8 @@ def _asin_from_info(azw3f):
 #  fmcache.db (modern read-state)  — SSH only (not on USB partition)
 # --------------------------------------------------------------------------- #
 def load_fmcache(path):
-    out = {"read_state": {}}
+    """{read_state: {asin: READ/UNREAD}, sessions: {asin: [start ms, ...]}}"""
+    out = {"read_state": {}, "sessions": {}}
     if not path or not os.path.exists(path):
         return out
     try:
@@ -191,7 +193,46 @@ def load_fmcache(path):
                 out["read_state"][asin] = d.get("read_state")   # READ / UNREAD
     except (sqlite3.Error, ValueError):
         pass
+    # device reading sessions (the same table the dashboard shows)
+    try:
+        for (sess,) in cur.execute("SELECT session FROM reading_sessions"):
+            p = json.loads(sess).get("payload", {})
+            if p.get("asin") and p.get("start_timestamp"):
+                out["sessions"].setdefault(p["asin"], []).append(p["start_timestamp"])
+    except (sqlite3.Error, ValueError, AttributeError):
+        pass
     con.close()
+    return out
+
+
+def load_series(cur):
+    """{cdeKey: (series name, index)} from cc.db's Series table. The index is
+    the position label when it is a number ("2"), else position + 1."""
+    names = {}
+    try:
+        for key, group, title in cur.execute(
+                "SELECT p_cdeKey, p_cdeGroup, p_titles_0_nominal FROM Entries "
+                "WHERE p_type='Entry:Item:Series'"):
+            for k in (key, group):
+                if k:
+                    names[k] = title
+    except sqlite3.Error:
+        return {}
+    out = {}
+    try:
+        for item, sid, pos, label in cur.execute(
+                "SELECT d_itemCdeKey, d_seriesId, d_itemPosition, "
+                "d_itemPositionLabel FROM Series"):
+            name = names.get(sid)
+            if not (item and name):
+                continue
+            try:
+                idx = float(label)
+            except (TypeError, ValueError):
+                idx = float(pos) + 1 if pos is not None else 1.0
+            out[item] = (name, idx)
+    except sqlite3.Error:
+        pass
     return out
 
 
@@ -203,6 +244,7 @@ class SSH(object):
         self.host, self.user, self.password, self.key = host, user, password, key
         self._c = None
         self._mode = None
+        sshdeps.activate()
         try:
             import paramiko  # noqa
             self._mode = "paramiko"
@@ -271,6 +313,12 @@ class SSH(object):
         return [l for l in data.decode("utf-8", "replace").splitlines()
                 if l.strip()]
 
+    def find_book_files(self):
+        """Every file under documents/ outside the .sdr folders."""
+        data = self.run_bytes("find '%s' -type f ! -path '*.sdr/*'" % REMOTE_DOCS)
+        return [l for l in data.decode("utf-8", "replace").splitlines()
+                if l.strip()]
+
     def close(self):
         if self._c is not None:
             try:
@@ -294,15 +342,61 @@ def ssh_reachable(host, timeout=2.5):
         return False
 
 
+def usbnet_hint(host):
+    """Windows often gives the Kindle's USB network (RNDIS) adapter an automatic
+    169.254.x address instead of one in the Kindle's subnet, so the Kindle is
+    unreachable. Detect that and return how to fix it ('' when not the case)."""
+    import socket
+    if os.name != "nt" or host.count(".") != 3:
+        return ""
+    try:
+        addrs = {ai[4][0] for ai in socket.getaddrinfo(
+            socket.gethostname(), None, socket.AF_INET)}
+    except OSError:
+        return ""
+    prefix = host.rsplit(".", 1)[0] + "."
+    if any(a.startswith(prefix) for a in addrs) or             not any(a.startswith("169.254.") for a in addrs):
+        return ""
+    idx = ""
+    try:
+        p = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-NetAdapter | ? { $_.InterfaceDescription -like '*RNDIS*' "
+             "-and $_.Status -eq 'Up' } | select -First 1).ifIndex"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15,
+            **_no_window_kwargs())
+        idx = p.stdout.decode("ascii", "ignore").strip()
+    except Exception:  # noqa
+        pass
+    pc_ip = prefix + ("1" if host.endswith(".201") else "201")
+    cmd = "New-NetIPAddress -InterfaceIndex %s -IPAddress %s -PrefixLength 24" % (
+        idx if idx.isdigit() else "<index>", pc_ip)
+    msg = ("\n\nThe Kindle's USB network adapter has no address in %s0/24 "
+           "(Windows gave it an automatic 169.254.x address). Fix it once, in "
+           "PowerShell run as Administrator:\n\n    %s" % (prefix, cmd))
+    if not idx.isdigit():
+        msg += ("\n\n(<index> = the ifIndex of the \"Kindle USB RNDIS\" adapter "
+                "in the output of Get-NetAdapter.)")
+    return msg
+
+
 def sync_ssh(cache, cfg, progress=lambda *a: None):
     if not ssh_reachable(cfg["ssh_host"]):
         raise RuntimeError(
             "SSH host %s:22 is not reachable. If the Kindle is plugged in as a "
             "USB drive, use the USB source instead (usbnet/SSH needs the device "
-            "configured for network, not mass-storage)." % cfg["ssh_host"])
+            "configured for network, not mass-storage)." % cfg["ssh_host"]
+            + usbnet_hint(cfg["ssh_host"]))
     docs = os.path.join(cache, "documents")
     os.makedirs(docs, exist_ok=True)
     ssh = SSH(cfg["ssh_host"], cfg["ssh_user"], cfg["ssh_password"], cfg["ssh_key"])
+    if ssh._mode == "binary" and not cfg["ssh_key"]:
+        # the system ssh runs with BatchMode (no prompts), so it cannot log in
+        # with a password
+        raise RuntimeError(
+            "SSH with a password needs SSH support. Open Configure and click "
+            "\"Install SSH support…\" (one-time download, no Python install "
+            "needed), or set a key file.")
     try:
         db = ssh.read_file(REMOTE_CCDB)
         if db:
@@ -316,6 +410,11 @@ def sync_ssh(cache, cfg, progress=lambda *a: None):
         except Exception:  # noqa
             pass
         files = ssh.find_sidecars()
+        books = [posixpath.relpath(p, REMOTE_DOCS) for p in ssh.find_book_files()]
+        save_book_list(cache, books)
+        files = [REMOTE_DOCS + "/" + r for r in drop_orphans(
+            [posixpath.relpath(p, REMOTE_DOCS) for p in files], books,
+            keep_all=cfg.get("include_deleted"))]
         for i, remote in enumerate(files, 1):
             rel = posixpath.relpath(remote, REMOTE_DOCS)
             local = os.path.join(docs, *rel.split("/"))
@@ -326,14 +425,57 @@ def sync_ssh(cache, cfg, progress=lambda *a: None):
             progress(i, len(files))
     finally:
         ssh.close()
+    if not db and not files:
+        raise RuntimeError(
+            "Reached %s over SSH but read nothing (no cc.db, no reading files). "
+            "Check the SSH user and password in Configure." % cfg["ssh_host"])
 
 
-def sync_usb(documents, cache, progress=lambda *a: None):
+def save_book_list(cache, book_files):
+    """The book files on the device (relative to documents/), for the
+    dashboard: it marks books whose .sdr folder is left over as deleted.
+    Same file name and format as dashboard.py's save_book_list."""
+    if not book_files:
+        return
+    with open(os.path.join(cache, "book_files.txt"), "w", encoding="utf-8") as f:
+        f.write(chr(10).join(b.replace(os.sep, "/") for b in book_files))
+
+
+def drop_orphans(sidecars, book_files, keep_all=False):
+    """Keep only sidecars whose book is still on the device. The Kindle keeps
+    a book's "<book minus extension>.sdr/" folder after the book is deleted,
+    so without this the dashboard lists books that are gone. Paths are
+    relative to documents/ with '/' separators. With no book list (listing
+    failed) or keep_all (Configure: include deleted books) nothing is dropped."""
+    if keep_all or not book_files:
+        return list(sidecars)
+    bases = set()
+    for f in book_files:
+        f = f.replace("\\", "/")
+        bases.add(f)                          # "KOReader.sh" -> "KOReader.sh.sdr"
+        bases.add(posixpath.splitext(f)[0])   # "x.azw3" -> "x.sdr"
+    out = []
+    for s in sidecars:
+        s2 = s.replace("\\", "/")
+        sdr = s2.split(".sdr/", 1)[0] if ".sdr/" in s2 else None
+        if sdr is None or sdr in bases:
+            out.append(s)
+    return out
+
+
+def sync_usb(documents, cache, progress=lambda *a: None, keep_all=False):
     docs = os.path.join(cache, "documents")
     os.makedirs(docs, exist_ok=True)
     srcs = []
     for pat in ["**/*" + ext for ext in SIDECAR_EXTS]:
         srcs += glob.glob(os.path.join(documents, pat), recursive=True)
+    books = []
+    for dirpath, dirs, names in os.walk(documents):
+        dirs[:] = [d for d in dirs if not d.endswith(".sdr")]
+        books += [os.path.relpath(os.path.join(dirpath, n), documents) for n in names]
+    save_book_list(cache, books)
+    srcs = [os.path.join(documents, r) for r in drop_orphans(
+        [os.path.relpath(s, documents) for s in srcs], books, keep_all)]
     for i, src in enumerate(srcs, 1):
         rel = os.path.relpath(src, documents)
         dst = os.path.join(docs, rel)
@@ -369,7 +511,7 @@ def is_mtp_kindle(dev):
         return False
 
 
-def sync_mtp(dev, cache):
+def sync_mtp(dev, cache, keep_all=False):
     """Copy every KRDS sidecar under documents/ from an MTP Kindle into
     <cache>/documents, mirroring the device layout (same shape sync_usb
     produces). MUST run on Calibre's device thread (a device-manager job):
@@ -379,7 +521,7 @@ def sync_mtp(dev, cache):
     fsc = dev.filesystem_cache
     storage = fsc.storage(getattr(dev, "_main_id", None)) or fsc.entries[0]
 
-    found = []
+    found, books = [], []
 
     def walk(names):
         for e in dev.list_folder_by_name(storage, *names):
@@ -387,8 +529,13 @@ def sync_mtp(dev, cache):
                 walk(names + (e.name,))
             elif e.name.endswith(SIDECAR_EXTS):
                 found.append(names + (e.name,))
+            elif not any(n.endswith(".sdr") for n in names):
+                books.append("/".join(names[1:] + (e.name,)))
 
     walk(("documents",))
+    save_book_list(cache, books)
+    keep = set(drop_orphans(["/".join(n[1:]) for n in found], books, keep_all))
+    found = [n for n in found if "/".join(n[1:]) in keep]
     for names in found:
         local = os.path.join(docs, *names[1:])
         os.makedirs(os.path.dirname(local), exist_ok=True)
@@ -534,8 +681,35 @@ def device_key(path):
     return p.lower()
 
 
+def _first_read(sessions, azw3f):
+    """Earliest reading session on the device (fmcache), else the earliest
+    entry of the book's page history."""
+    times = [t for t in (sessions or []) if t]
+    ph = azw3f.get("page.history.store")
+    if isinstance(ph, list):
+        for e in ph:
+            if isinstance(e, dict) and e.get("time"):
+                times.append(e["time"])
+    dts = [d for d in (_to_datetime(t) for t in times) if d]
+    return min(dts) if dts else None
+
+
+def annotations_raw(azw3r):
+    """annotation.cache.object flattened to [{type, startPosition, ...}]
+    (the same shape as azw3text/extract_highlights.annotations_from_azw3r)."""
+    out = []
+    aco = (azw3r or {}).get("annotation.cache.object")
+    if isinstance(aco, dict):
+        for cls, items in aco.items():
+            if isinstance(items, list):
+                out += [dict(it, type=cls.split(".")[-1]) for it in items
+                        if isinstance(it, dict)]
+    return out
+
+
 def _book_from_sidecars(azw3f, azw3r, title, author, asin, read_status,
-                        cc_last_access=None, cc_percent=None, sdr_key=None):
+                        cc_last_access=None, cc_percent=None, sdr_key=None,
+                        series=None, sessions=None, sdr_dir=None):
     stats = _stats_from_timer(azw3f.get("timer.model"), azw3f.get("book.info.store"))
     pos = _furthest_position(azw3f)
     pg = _page_of(azw3r, pos)
@@ -558,8 +732,14 @@ def _book_from_sidecars(azw3f, azw3r, title, author, asin, read_status,
         "words": stats.get("words_read"),
         "book_words": stats.get("book_words") or None,
         "annotations": _annotations_count(azw3r),
-        "status": read_status,
+        # no mark on the device (no cc.db / fmcache): opened = reading
+        "status": read_status or ("reading" if pct else "unread"),
         "last_read": _last_read(azw3f, cc_last_access),
+        "first_read": _first_read(sessions, azw3f),
+        "sessions": len(sessions) if sessions else None,
+        "series": series,                # (name, index) from cc.db, or None
+        "annots_raw": annotations_raw(azw3r),
+        "sdr_dir": sdr_dir,              # cache folder, for highlight text
         "has_data": bool(azw3f.get("timer.model") or azw3r),
     }
 
@@ -575,11 +755,19 @@ def build_from_ccdb(cache):
     cur = con.cursor()
     cols = [d[1] for d in cur.execute("PRAGMA table_info(Entries)")]
     rows = cur.execute("SELECT * FROM Entries WHERE p_type='Entry:Item'").fetchall()
+    series = load_series(cur)
     books, used_sdr = [], set()
+    # every location cc.db knows, of any type (dictionaries, My Clippings):
+    # their .sdr folders must not come back as sidecar-only books
+    for (loc,) in cur.execute("SELECT p_location FROM Entries "
+                              "WHERE p_location LIKE '/mnt/us/%'"):
+        base = os.path.splitext(loc[len("/mnt/us/"):])[0]
+        used_sdr.add(os.path.normcase(os.path.normpath(
+            os.path.join(cache, *(base + ".sdr").split("/")))))
     for row in rows:
         r = {k: row[k] for k in cols}
         loc = r.get("p_location") or ""
-        azw3f, azw3r = {}, {}
+        azw3f, azw3r, sdr = {}, {}, None
         key = device_key(loc[len("/mnt/us/"):]) if loc.startswith("/mnt/us/") else None
         if loc.startswith("/mnt/us/"):
             base, _ = os.path.splitext(loc[len("/mnt/us/"):])
@@ -607,7 +795,8 @@ def build_from_ccdb(cache):
             azw3f, azw3r,
             r.get("p_titles_0_nominal") or "", _author(r),
             cde, status, cc_last_access=r.get("p_lastAccess"),
-            cc_percent=r.get("p_percentFinished"), sdr_key=key))
+            cc_percent=r.get("p_percentFinished"), sdr_key=key,
+            series=series.get(cde), sessions=fm["sessions"].get(cde), sdr_dir=sdr))
     con.close()
     return books + build_from_usb(cache, skip=used_sdr)
 
@@ -617,7 +806,8 @@ def build_from_usb(cache, skip=()):
     book.info.store when present. Read status only when an fmcache.db is
     available (synced, or a copy set in Configure)."""
     docs = os.path.join(cache, "documents")
-    fm_rs = load_fmcache(os.path.join(cache, "fmcache.db"))["read_state"]
+    fm = load_fmcache(os.path.join(cache, "fmcache.db"))
+    fm_rs = fm["read_state"]
     books = []
     for dirpath, _dirs, files in os.walk(docs):
         f3 = [f for f in files if f.endswith(METRICS_EXTS)]
@@ -644,7 +834,8 @@ def build_from_usb(cache, skip=()):
         status = {"READ": "read", "UNREAD": "unread"}.get(fm_rs.get(asin))
         books.append(_book_from_sidecars(
             azw3f, azw3r, title, author, asin, status,
-            sdr_key=device_key(os.path.relpath(dirpath, cache))))
+            sdr_key=device_key(os.path.relpath(dirpath, cache)),
+            sessions=fm["sessions"].get(asin), sdr_dir=dirpath))
     return books
 
 
@@ -663,15 +854,17 @@ NO_KINDLE_MSG = (
     "No Kindle found. Connect the Kindle as a USB drive (or set its documents "
     "folder in Configure). Newer Kindles (Scribe 3, Colorsoft, 2024+ "
     "Paperwhite) connect over MTP instead: those are read through Calibre's own "
-    "device connection, which needs Calibre 7.25 or later. To pull data over "
-    "the network instead, set Source = ssh in Configure.")
+    "device connection, which needs Calibre 7.25 or later. A jailbroken Kindle "
+    "on USB networking is used automatically when its SSH host (Configure) "
+    "answers.")
 
 
 def sync(cache, cfg, source, progress=lambda *a: None):
     """Pull the device's data into `cache` (documents/ + cc.db/fmcache.db when
-    the source has them). Returns the source used. Never silently falls back
-    to SSH: SSH only runs when explicitly selected, so a disconnected device
-    gives a clear error instead of a hung/failed SSH attempt."""
+    the source has them). Returns the source used. `auto` prefers USB / MTP
+    and uses SSH only when no USB Kindle is found and the SSH port answers a
+    quick TCP probe, so a disconnected device gives a clear error instead of a
+    hung SSH attempt."""
     if source == "ssh":
         sync_ssh(cache, cfg, progress)
         return "ssh"
@@ -680,9 +873,13 @@ def sync(cache, cfg, source, progress=lambda *a: None):
         return "mtp"
     # usb / auto: locate the Kindle's documents folder (off the GUI thread)
     docs = resolve_usb_documents(cfg)
+    if not docs and source == "auto" and cfg.get("ssh_host") \
+            and ssh_reachable(cfg["ssh_host"]):
+        sync_ssh(cache, cfg, progress)
+        return "ssh"
     if not docs:
         raise RuntimeError(NO_KINDLE_MSG)
-    sync_usb(docs, cache, progress)
+    sync_usb(docs, cache, progress, keep_all=cfg.get("include_deleted"))
     return "usb"
 
 

@@ -19,6 +19,10 @@ FIELDS = [
     ("annotations", "Highlights / notes",   "int",      "#kannots",     False),
     ("status",      "Read status",          "text",     "#kreadstatus", True),
     ("last_read",   "Last read",            "datetime", "#klastread",   False),
+    ("first_read",  "First read",           "datetime", "#kfirstread",  False),
+    ("sessions",    "Reading sessions",     "int",      "#ksessions",   False),
+    ("series",      "Series (on the Kindle)", "series", "#kseries",     False),
+    ("highlights",  "Highlights text",      "comments", "#khighlights", False),
 ]
 
 # convenience views

@@ -11,7 +11,15 @@ python dashboard.py sync | build       # individual steps
 python dashboard.py serve --ccdb D:/backup/cc.db --fmcache D:/backup/fmcache.db
                                        # use copies of the DBs from elsewhere (read only)
 python dashboard.py serve --cache D:/kindle-cache   # keep synced files elsewhere
+python dashboard.py serve --include-deleted   # also books deleted from the Kindle
 ```
+
+The Kindle keeps a deleted book's `.sdr` folder (and its reading data). By
+default those are skipped: each sync writes `book_files.txt` (the book files on
+the device) to the cache, and only `.sdr` folders whose book is still there are
+read. With `--include-deleted` they are listed too, marked *(deleted)*.
+Cloud-only items, KUAL / KOReader launchers (`.sh`) and My Clippings are never
+listed.
 
 Works with whatever is available:
 

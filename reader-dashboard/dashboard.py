@@ -51,6 +51,37 @@ REMOTE_DOCS = "/mnt/us/documents"
 # cc.db / fmcache.db copied somewhere else (--ccdb / --fmcache): read only
 CCDB_OVERRIDE = None
 FMCACHE_OVERRIDE = None
+INCLUDE_DELETED = False   # --include-deleted: also list deleted books' .sdr data
+
+
+BOOK_LIST = "book_files.txt"   # in CACHE: files under documents/ outside .sdr
+
+
+def book_bases(book_files):
+    """Names a book's .sdr folder can have: "x.azw3" -> "x", plus the full
+    name ("KOReader.sh" -> "KOReader.sh.sdr"). Paths relative to documents/."""
+    out = set()
+    for f in book_files:
+        f = f.replace("\\", "/")
+        out.add(f)
+        out.add(posixpath.splitext(f)[0])
+    return out
+
+
+def save_book_list(book_files):
+    with open(os.path.join(CACHE, BOOK_LIST), "w", encoding="utf-8") as f:
+        f.write("\n".join(b.replace("\\", "/") for b in book_files))
+
+
+def load_book_bases():
+    """book_bases() of the last sync's book list, or None when unknown (an
+    older cache, or the list could not be made): then nothing is dropped."""
+    try:
+        with open(os.path.join(CACHE, BOOK_LIST), encoding="utf-8") as f:
+            files = [l for l in f.read().splitlines() if l.strip()]
+    except OSError:
+        return None
+    return book_bases(files) if files else None
 
 
 def set_cache(path):
@@ -153,6 +184,16 @@ def sync_ssh():
     _in, out, _e = c.exec_command(
         "find '%s' \\( %s \\)" % (REMOTE_DOCS, find_expr))
     files = [l for l in out.read().decode("utf-8", "replace").splitlines() if l.strip()]
+    _in, out, _e = c.exec_command("find '%s' -type f ! -path '*.sdr/*'" % REMOTE_DOCS)
+    book_files = [posixpath.relpath(l, REMOTE_DOCS) for l in
+                  out.read().decode("utf-8", "replace").splitlines() if l.strip()]
+    if book_files:
+        save_book_list(book_files)
+        if not INCLUDE_DELETED:
+            # skip the .sdr folders the Kindle leaves behind for deleted books
+            bases = book_bases(book_files)
+            files = [p for p in files if ".sdr/" not in p or
+                     posixpath.relpath(p, REMOTE_DOCS).split(".sdr/")[0] in bases]
     print("found %d sidecars" % len(files))
     for i, remote in enumerate(files, 1):
         rel = posixpath.relpath(remote, REMOTE_DOCS)
@@ -180,16 +221,55 @@ def sync_ssh():
     print("sync complete -> %s" % CACHE)
 
 
+def sync_plugin(conf_path):
+    """Started from the Calibre plugin (--plugin-sync): read the Kindle again
+    with the plugin's own engine (this runs on calibre's Python, calibre-debug),
+    so the page's sync button works like Calibre's "Open web dashboard".
+    The book text calibre made for highlights is kept (it needs the library,
+    which only the Calibre GUI has open)."""
+    import shutil
+    import tempfile
+    with open(conf_path, encoding="utf-8") as f:
+        conf = json.load(f)
+    from calibre.customize.ui import initialized_plugins
+    initialized_plugins()
+    from calibre_plugins.kindle_reading import engine
+    staging = tempfile.mkdtemp(prefix="kindle_reading_dash_")
+    try:
+        engine.sync(staging, conf["cfg"], conf["source"])
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    for dirpath, _dirs, files in os.walk(DOCS_CACHE):
+        if "assembled_text.dat" in files:
+            dst = os.path.join(staging, os.path.relpath(dirpath, CACHE))
+            if os.path.isdir(dst):
+                shutil.copy2(os.path.join(dirpath, "assembled_text.dat"), dst)
+    shutil.rmtree(CACHE, ignore_errors=True)
+    shutil.move(staging, CACHE)
+    print("synced via the Calibre plugin -> %s" % CACHE)
+
+
 def sync_local(docs):
     """Mirror cc.db + sidecars from a locally-mounted Kindle (e.g. D:/documents)."""
     import shutil
     os.makedirs(DOCS_CACHE, exist_ok=True)
     # cc.db: try the mount root's /system or var? On USB mass-storage cc.db is NOT
     # exposed, so allow a pre-pulled cache/cc.db to stand. Only sidecars come from USB.
+    book_files = []
+    for dirpath, dirs, names in os.walk(docs):
+        dirs[:] = [d for d in dirs if not d.endswith(".sdr")]
+        book_files += [os.path.relpath(os.path.join(dirpath, n), docs) for n in names]
+    if book_files:
+        save_book_list(book_files)
+    bases = book_bases(book_files) if book_files and not INCLUDE_DELETED else None
     n = 0
     for pat in ["**/*" + ext for ext in SIDECAR_EXTS]:
         for src in glob.glob(os.path.join(docs, pat), recursive=True):
             rel = os.path.relpath(src, docs)
+            sdr = rel.replace(os.sep, "/").split(".sdr/")[0]
+            if bases is not None and sdr != rel.replace(os.sep, "/") and sdr not in bases:
+                continue   # .sdr folder of a deleted book
             dst = os.path.join(DOCS_CACHE, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(src, dst)
@@ -599,11 +679,16 @@ def _books_from_sidecars(fm, skip=()):
     fmcache mark if there is one, else reading/unread by progress."""
     books = []
     skip = {os.path.normcase(os.path.normpath(p)) for p in skip}
+    on_device = load_book_bases()
     for sdr_local in sorted(_iter_cached_sdr()):
         if os.path.normcase(os.path.normpath(sdr_local)) in skip:
             continue
         if not any(f.endswith(METRICS_EXTS) for f in os.listdir(sdr_local)):
             continue
+        rel_docs = os.path.relpath(sdr_local, DOCS_CACHE).replace(os.sep, "/")[:-4]
+        deleted = on_device is not None and rel_docs not in on_device
+        if deleted and not INCLUDE_DELETED:
+            continue   # the Kindle keeps a deleted book's .sdr folder
         sc = _sidecar_data(sdr_local)
         folder = os.path.basename(sdr_local)[:-4]
         bi = sc["azw3f"].get("book.info.store")
@@ -647,8 +732,18 @@ def _books_from_sidecars(fm, skip=()):
             "cc_raw": {},
             "azw3f": sc["azw3f"],
             "azw3r": sc["azw3r"],
+            "deleted": deleted,      # book file no longer on the Kindle
         })
     return books
+
+
+def _on_device_book(loc):
+    """cc.db also lists cloud items that are not downloaded (no location) and
+    non-book files: KUAL / KOReader launchers (.sh) and My Clippings."""
+    if not loc:
+        return False
+    name = posixpath.basename(loc)
+    return not (name.endswith(".sh") or name == "My Clippings.txt")
 
 
 def _books_from_ccdb(path, fm):
@@ -680,9 +775,17 @@ def _books_from_ccdb(path, fm):
         "SELECT * FROM Entries WHERE p_type='Entry:Item'").fetchall()
 
     books, used_sdr = [], []
+    # every location cc.db knows, of any type (dictionaries, My Clippings,
+    # launchers): their .sdr folders must not come back as sidecar-only books
+    for (loc,) in cur.execute("SELECT p_location FROM Entries "
+                              "WHERE p_location LIKE '/mnt/us/%'"):
+        base = os.path.splitext(loc[len("/mnt/us/"):])[0]
+        used_sdr.append(os.path.join(CACHE, *(base + ".sdr").split("/")))
     for row in rows:
         r = {k: row[k] for k in cols}
         loc = r.get("p_location") or ""
+        if not _on_device_book(loc):
+            continue
         # locate sidecars: <loc minus ext>.sdr/  under the cache
         sdr_local = None
         if loc.startswith("/mnt/us/"):
@@ -755,6 +858,8 @@ class Handler(SimpleHTTPRequestHandler):
                 mode, local = Handler.sync_mode
                 if mode == "ssh":
                     sync_ssh()
+                elif mode == "plugin":
+                    sync_plugin(local)
                 elif mode == "local" and local:
                     sync_local(local)
                 build()                 # mode "none": data is synced by the caller
@@ -773,11 +878,24 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _Server(ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second server bind the same port, so the
+    # "already running" check below never fired and every launch left one
+    # more server running. Ask for exclusive use there instead.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        import socket
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def serve(port=8742):
     os.chdir(WEB)
     url = "http://127.0.0.1:%d/" % port
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        httpd = _Server(("127.0.0.1", port), Handler)
     except OSError:
         # a dashboard is already running on this port (it serves the same web/
         # folder, so it already has the library.json just built): reuse it
@@ -802,12 +920,17 @@ def main():
     ap.add_argument("--local", metavar="DOCS_DIR",
                     help="read sidecars from a local/USB documents folder instead of SSH")
     ap.add_argument("--no-sync", action="store_true", help="skip syncing, reuse cache")
+    ap.add_argument("--plugin-sync", metavar="JSON",
+                    help="(Calibre plugin) settings for the page's sync button")
     ap.add_argument("--port", type=int, default=8742)
     ap.add_argument("--cache", metavar="DIR", help="folder for synced files (default ./cache)")
     ap.add_argument("--ccdb", metavar="PATH",
                     help="use this cc.db (e.g. a copy) instead of the synced one; read only")
     ap.add_argument("--fmcache", metavar="PATH",
                     help="use this fmcache.db instead of the synced one; read only")
+    ap.add_argument("--include-deleted", action="store_true",
+                    help="also list books deleted from the Kindle whose reading "
+                         "files (.sdr) are still there")
     args = ap.parse_args()
 
     global CCDB_OVERRIDE, FMCACHE_OVERRIDE
@@ -817,10 +940,14 @@ def main():
         if path and not os.path.isfile(path):
             sys.exit("%s: no such file: %s" % (opt, path))
     CCDB_OVERRIDE = args.ccdb and os.path.abspath(args.ccdb)
+    global INCLUDE_DELETED
+    INCLUDE_DELETED = args.include_deleted
     FMCACHE_OVERRIDE = args.fmcache and os.path.abspath(args.fmcache)
 
     if args.local:
         mode = ("local", args.local)
+    elif args.plugin_sync:
+        mode = ("plugin", args.plugin_sync)   # button: read the Kindle via calibre
     elif args.no_sync:
         mode = ("none", None)            # the page's refresh button only rebuilds
     else:

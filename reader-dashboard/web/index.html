@@ -92,7 +92,7 @@ function render() {
     const cp = currentPage(b), tp = totalPages(b);
     const pageCell = (cp != null && tp) ? `${cp}/${tp}` : (tp ? `–/${tp}` : '—');
     return `<tr onclick="location='book.html?uuid=${encodeURIComponent(b.uuid)}'" class="${b.has_sidecar ? '' : 'nosc'}">
-      <td class="title">${esc(b.title)}</td>
+      <td class="title">${esc(b.title)}${b.deleted ? ' <span class="muted" title="The book file is no longer on the Kindle; its reading data is">(deleted)</span>' : ''}</td>
       <td class="author">${esc(b.author) || '—'}</td>
       <td class="muted">${b.series ? esc(b.series.name || b.series.label || '✓') : '—'}</td>
       <td class="num"><div style="display:flex;align-items:center;gap:6px;justify-content:flex-end">
