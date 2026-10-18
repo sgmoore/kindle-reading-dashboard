@@ -5,11 +5,13 @@ from calibre.utils.config import JSONConfig
 try:
     from qt.core import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
                          QComboBox, QLabel, QPushButton, QGroupBox, QGridLayout,
-                         QCheckBox, QScrollArea, QProgressDialog, QTimer, Qt)
+                         QCheckBox, QScrollArea, QProgressDialog, QTimer, Qt,
+                         QFrame, QSize)
 except ImportError:  # very old calibre
     from PyQt5.Qt import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
                           QComboBox, QLabel, QPushButton, QGroupBox, QGridLayout,
-                          QCheckBox, QScrollArea, QProgressDialog, QTimer, Qt)
+                          QCheckBox, QScrollArea, QProgressDialog, QTimer, Qt,
+                          QFrame, QSize)
 
 from calibre_plugins.kindle_reading.fields import (
     FIELDS, FIELD_LABEL, FIELD_DT, DEFAULT_COL, DEFAULT_ON)
@@ -73,15 +75,33 @@ def enabled_columns():
     return out
 
 
+def _form(box):
+    """QFormLayout whose fields take the full width (the Windows style
+    otherwise keeps them at their small size hint)."""
+    f = QFormLayout(box)
+    f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    return f
+
+
 class ConfigWidget(QWidget):
 
     def __init__(self):
         QWidget.__init__(self)
-        v = QVBoxLayout(self)
+        # one scroll for the whole page: calibre's dialog takes its size from
+        # sizeHint(), and on a short screen the sections would be squashed
+        outer_l = QVBoxLayout(self)
+        outer_l.setContentsMargins(0, 0, 0, 0)
+        page_scroll = QScrollArea()
+        page_scroll.setWidgetResizable(True)
+        page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._page = QWidget()
+        page_scroll.setWidget(self._page)
+        outer_l.addWidget(page_scroll)
+        v = QVBoxLayout(self._page)
 
         # ---- source ----
         src_box = QGroupBox("Data source")
-        sf = QFormLayout(src_box)
+        sf = _form(src_box)
         self.source = QComboBox()
         self.source.addItems(["auto", "usb", "ssh"])
         self.source.setCurrentText(prefs["source"])
@@ -111,7 +131,7 @@ class ConfigWidget(QWidget):
 
         # ---- ssh ----
         ssh_box = QGroupBox("SSH (usbnet) — only used when Source = ssh")
-        ef = QFormLayout(ssh_box)
+        ef = _form(ssh_box)
         self.ssh_host = QLineEdit(prefs["ssh_host"])
         self.ssh_user = QLineEdit(prefs["ssh_user"])
         self.ssh_password = QLineEdit(prefs["ssh_password"])
@@ -138,10 +158,8 @@ class ConfigWidget(QWidget):
         # ---- fields (checklist) ----
         col_box = QGroupBox("Fields to import (tick = add as a custom column)")
         outer = QVBoxLayout(col_box)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        inner = QWidget()
-        grid = QGridLayout(inner)
+        grid = QGridLayout()
+        grid.setColumnStretch(2, 1)
         grid.addWidget(QLabel("<b>Field</b>"), 0, 0)
         grid.addWidget(QLabel("<b>Type</b>"), 0, 1)
         grid.addWidget(QLabel("<b>Column lookup name</b>"), 0, 2)
@@ -156,8 +174,7 @@ class ConfigWidget(QWidget):
             grid.addWidget(cb, i, 0)
             grid.addWidget(QLabel(dt), i, 1)
             grid.addWidget(e, i, 2)
-        scroll.setWidget(inner)
-        outer.addWidget(scroll)
+        outer.addLayout(grid)
         self.match_by_title = QCheckBox("Also match by title when Calibre's device matching and ASIN find nothing "
                                         "(only when the title is unambiguous)")
         self.match_by_title.setChecked(bool(prefs["match_by_title"]))
@@ -172,7 +189,7 @@ class ConfigWidget(QWidget):
 
         # ---- dashboard ----
         d_box = QGroupBox("Web dashboard")
-        df = QFormLayout(d_box)
+        df = _form(d_box)
         self.dashboard_py = QLineEdit(prefs["dashboard_py"])
         self.dashboard_py.setPlaceholderText("blank = built-in dashboard (recommended)")
         df.addRow("Custom dashboard.py", self._with_browse(
@@ -181,6 +198,16 @@ class ConfigWidget(QWidget):
         v.addWidget(d_box)
 
         v.addWidget(QLabel("Changes to columns require a Calibre restart."))
+
+    def sizeHint(self):
+        want = self._page.sizeHint()
+        h = want.height() + 20
+        try:
+            from qt.core import QApplication
+            h = min(h, QApplication.primaryScreen().availableGeometry().height() - 160)
+        except Exception:  # noqa
+            pass
+        return QSize(max(860, want.width() + 30), max(500, h))
 
     def _with_browse(self, edit, title, filters=None):
         """`edit` plus a Browse… button. filters=None picks a folder;
