@@ -28,6 +28,7 @@ prefs.defaults["ssh_key"] = ""              # private-key path (optional)
 prefs.defaults["dashboard_py"] = ""         # custom dashboard.py (blank = the bundled one)
 prefs.defaults["ccdb_path"] = ""            # a copy of the Kindle's cc.db (optional)
 prefs.defaults["fmcache_path"] = ""         # a copy of the Kindle's fmcache.db (optional)
+prefs.defaults["include_deleted"] = False   # also read books deleted from the Kindle
 
 HELP_HTML = """
 <b>What works with what</b><br>
@@ -119,6 +120,10 @@ class ConfigWidget(QWidget):
         self.fmcache_path.setPlaceholderText("optional: a copy of fmcache.db")
         sf.addRow("fmcache.db file", self._with_browse(
             self.fmcache_path, "Choose a copy of the Kindle's fmcache.db", filters=db_filter))
+        self.include_deleted = QCheckBox(
+            "Also read books deleted from the Kindle (it keeps their reading data)")
+        self.include_deleted.setChecked(bool(prefs["include_deleted"]))
+        sf.addRow("", self.include_deleted)
         v.addWidget(src_box)
 
         help_box = QGroupBox("Help: what you need")
@@ -338,6 +343,7 @@ class ConfigWidget(QWidget):
         prefs["dashboard_py"] = self.dashboard_py.text().strip()
         prefs["ccdb_path"] = self.ccdb_path.text().strip()
         prefs["fmcache_path"] = self.fmcache_path.text().strip()
+        prefs["include_deleted"] = bool(self.include_deleted.isChecked())
         prefs["match_by_title"] = bool(self.match_by_title.isChecked())
         prefs["auto_on_connect"] = bool(self.auto_on_connect.isChecked())
         on, cols = {}, {}

@@ -371,8 +371,10 @@ def sync_ssh(cache, cfg, progress=lambda *a: None):
             pass
         files = ssh.find_sidecars()
         books = [posixpath.relpath(p, REMOTE_DOCS) for p in ssh.find_book_files()]
+        save_book_list(cache, books)
         files = [REMOTE_DOCS + "/" + r for r in drop_orphans(
-            [posixpath.relpath(p, REMOTE_DOCS) for p in files], books)]
+            [posixpath.relpath(p, REMOTE_DOCS) for p in files], books,
+            keep_all=cfg.get("include_deleted"))]
         for i, remote in enumerate(files, 1):
             rel = posixpath.relpath(remote, REMOTE_DOCS)
             local = os.path.join(docs, *rel.split("/"))
@@ -389,13 +391,23 @@ def sync_ssh(cache, cfg, progress=lambda *a: None):
             "Check the SSH user and password in Configure." % cfg["ssh_host"])
 
 
-def drop_orphans(sidecars, book_files):
+def save_book_list(cache, book_files):
+    """The book files on the device (relative to documents/), for the
+    dashboard: it marks books whose .sdr folder is left over as deleted.
+    Same file name and format as dashboard.py's save_book_list."""
+    if not book_files:
+        return
+    with open(os.path.join(cache, "book_files.txt"), "w", encoding="utf-8") as f:
+        f.write(chr(10).join(b.replace(os.sep, "/") for b in book_files))
+
+
+def drop_orphans(sidecars, book_files, keep_all=False):
     """Keep only sidecars whose book is still on the device. The Kindle keeps
     a book's "<book minus extension>.sdr/" folder after the book is deleted,
     so without this the dashboard lists books that are gone. Paths are
     relative to documents/ with '/' separators. With no book list (listing
-    failed) nothing is dropped."""
-    if not book_files:
+    failed) or keep_all (Configure: include deleted books) nothing is dropped."""
+    if keep_all or not book_files:
         return list(sidecars)
     bases = set()
     for f in book_files:
@@ -411,7 +423,7 @@ def drop_orphans(sidecars, book_files):
     return out
 
 
-def sync_usb(documents, cache, progress=lambda *a: None):
+def sync_usb(documents, cache, progress=lambda *a: None, keep_all=False):
     docs = os.path.join(cache, "documents")
     os.makedirs(docs, exist_ok=True)
     srcs = []
@@ -421,8 +433,9 @@ def sync_usb(documents, cache, progress=lambda *a: None):
     for dirpath, dirs, names in os.walk(documents):
         dirs[:] = [d for d in dirs if not d.endswith(".sdr")]
         books += [os.path.relpath(os.path.join(dirpath, n), documents) for n in names]
+    save_book_list(cache, books)
     srcs = [os.path.join(documents, r) for r in drop_orphans(
-        [os.path.relpath(s, documents) for s in srcs], books)]
+        [os.path.relpath(s, documents) for s in srcs], books, keep_all)]
     for i, src in enumerate(srcs, 1):
         rel = os.path.relpath(src, documents)
         dst = os.path.join(docs, rel)
@@ -458,7 +471,7 @@ def is_mtp_kindle(dev):
         return False
 
 
-def sync_mtp(dev, cache):
+def sync_mtp(dev, cache, keep_all=False):
     """Copy every KRDS sidecar under documents/ from an MTP Kindle into
     <cache>/documents, mirroring the device layout (same shape sync_usb
     produces). MUST run on Calibre's device thread (a device-manager job):
@@ -480,7 +493,8 @@ def sync_mtp(dev, cache):
                 books.append("/".join(names[1:] + (e.name,)))
 
     walk(("documents",))
-    keep = set(drop_orphans(["/".join(n[1:]) for n in found], books))
+    save_book_list(cache, books)
+    keep = set(drop_orphans(["/".join(n[1:]) for n in found], books, keep_all))
     found = [n for n in found if "/".join(n[1:]) in keep]
     for names in found:
         local = os.path.join(docs, *names[1:])
@@ -781,7 +795,7 @@ def sync(cache, cfg, source, progress=lambda *a: None):
         return "ssh"
     if not docs:
         raise RuntimeError(NO_KINDLE_MSG)
-    sync_usb(docs, cache, progress)
+    sync_usb(docs, cache, progress, keep_all=cfg.get("include_deleted"))
     return "usb"
 
 

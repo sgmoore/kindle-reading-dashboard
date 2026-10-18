@@ -51,6 +51,37 @@ REMOTE_DOCS = "/mnt/us/documents"
 # cc.db / fmcache.db copied somewhere else (--ccdb / --fmcache): read only
 CCDB_OVERRIDE = None
 FMCACHE_OVERRIDE = None
+INCLUDE_DELETED = False   # --include-deleted: also list deleted books' .sdr data
+
+
+BOOK_LIST = "book_files.txt"   # in CACHE: files under documents/ outside .sdr
+
+
+def book_bases(book_files):
+    """Names a book's .sdr folder can have: "x.azw3" -> "x", plus the full
+    name ("KOReader.sh" -> "KOReader.sh.sdr"). Paths relative to documents/."""
+    out = set()
+    for f in book_files:
+        f = f.replace("\\", "/")
+        out.add(f)
+        out.add(posixpath.splitext(f)[0])
+    return out
+
+
+def save_book_list(book_files):
+    with open(os.path.join(CACHE, BOOK_LIST), "w", encoding="utf-8") as f:
+        f.write("\n".join(b.replace("\\", "/") for b in book_files))
+
+
+def load_book_bases():
+    """book_bases() of the last sync's book list, or None when unknown (an
+    older cache, or the list could not be made): then nothing is dropped."""
+    try:
+        with open(os.path.join(CACHE, BOOK_LIST), encoding="utf-8") as f:
+            files = [l for l in f.read().splitlines() if l.strip()]
+    except OSError:
+        return None
+    return book_bases(files) if files else None
 
 
 def set_cache(path):
@@ -153,6 +184,16 @@ def sync_ssh():
     _in, out, _e = c.exec_command(
         "find '%s' \\( %s \\)" % (REMOTE_DOCS, find_expr))
     files = [l for l in out.read().decode("utf-8", "replace").splitlines() if l.strip()]
+    _in, out, _e = c.exec_command("find '%s' -type f ! -path '*.sdr/*'" % REMOTE_DOCS)
+    book_files = [posixpath.relpath(l, REMOTE_DOCS) for l in
+                  out.read().decode("utf-8", "replace").splitlines() if l.strip()]
+    if book_files:
+        save_book_list(book_files)
+        if not INCLUDE_DELETED:
+            # skip the .sdr folders the Kindle leaves behind for deleted books
+            bases = book_bases(book_files)
+            files = [p for p in files if ".sdr/" not in p or
+                     posixpath.relpath(p, REMOTE_DOCS).split(".sdr/")[0] in bases]
     print("found %d sidecars" % len(files))
     for i, remote in enumerate(files, 1):
         rel = posixpath.relpath(remote, REMOTE_DOCS)
@@ -186,10 +227,20 @@ def sync_local(docs):
     os.makedirs(DOCS_CACHE, exist_ok=True)
     # cc.db: try the mount root's /system or var? On USB mass-storage cc.db is NOT
     # exposed, so allow a pre-pulled cache/cc.db to stand. Only sidecars come from USB.
+    book_files = []
+    for dirpath, dirs, names in os.walk(docs):
+        dirs[:] = [d for d in dirs if not d.endswith(".sdr")]
+        book_files += [os.path.relpath(os.path.join(dirpath, n), docs) for n in names]
+    if book_files:
+        save_book_list(book_files)
+    bases = book_bases(book_files) if book_files and not INCLUDE_DELETED else None
     n = 0
     for pat in ["**/*" + ext for ext in SIDECAR_EXTS]:
         for src in glob.glob(os.path.join(docs, pat), recursive=True):
             rel = os.path.relpath(src, docs)
+            sdr = rel.replace(os.sep, "/").split(".sdr/")[0]
+            if bases is not None and sdr != rel.replace(os.sep, "/") and sdr not in bases:
+                continue   # .sdr folder of a deleted book
             dst = os.path.join(DOCS_CACHE, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(src, dst)
@@ -550,14 +601,11 @@ def build():
     ccdb = CCDB_OVERRIDE or DB_PATH
     if os.path.exists(ccdb):
         books, used_sdr = _books_from_ccdb(ccdb, fm)
-        # books on the device that an older cc.db copy does not know. A cc.db
-        # synced from the device lists every book on it, so there the other
-        # .sdr folders belong to deleted books (the Kindle leaves them behind)
-        if CCDB_OVERRIDE:
-            extra = _books_from_sidecars(fm, skip=used_sdr)
-            if extra:
-                print("%d book(s) not in cc.db, added from their sidecars" % len(extra))
-            books += extra
+        # books on the device that this cc.db does not know (e.g. an older copy)
+        extra = _books_from_sidecars(fm, skip=used_sdr)
+        if extra:
+            print("%d book(s) not in cc.db, added from their sidecars" % len(extra))
+        books += extra
         source = "cc.db"
     elif any(True for _ in _iter_cached_sdr()):
         print("no cc.db - building from the sidecar files only")
@@ -602,11 +650,16 @@ def _books_from_sidecars(fm, skip=()):
     fmcache mark if there is one, else reading/unread by progress."""
     books = []
     skip = {os.path.normcase(os.path.normpath(p)) for p in skip}
+    on_device = load_book_bases()
     for sdr_local in sorted(_iter_cached_sdr()):
         if os.path.normcase(os.path.normpath(sdr_local)) in skip:
             continue
         if not any(f.endswith(METRICS_EXTS) for f in os.listdir(sdr_local)):
             continue
+        rel_docs = os.path.relpath(sdr_local, DOCS_CACHE).replace(os.sep, "/")[:-4]
+        deleted = on_device is not None and rel_docs not in on_device
+        if deleted and not INCLUDE_DELETED:
+            continue   # the Kindle keeps a deleted book's .sdr folder
         sc = _sidecar_data(sdr_local)
         folder = os.path.basename(sdr_local)[:-4]
         bi = sc["azw3f"].get("book.info.store")
@@ -650,6 +703,7 @@ def _books_from_sidecars(fm, skip=()):
             "cc_raw": {},
             "azw3f": sc["azw3f"],
             "azw3r": sc["azw3r"],
+            "deleted": deleted,      # book file no longer on the Kindle
         })
     return books
 
@@ -692,6 +746,12 @@ def _books_from_ccdb(path, fm):
         "SELECT * FROM Entries WHERE p_type='Entry:Item'").fetchall()
 
     books, used_sdr = [], []
+    # every location cc.db knows, of any type (dictionaries, My Clippings,
+    # launchers): their .sdr folders must not come back as sidecar-only books
+    for (loc,) in cur.execute("SELECT p_location FROM Entries "
+                              "WHERE p_location LIKE '/mnt/us/%'"):
+        base = os.path.splitext(loc[len("/mnt/us/"):])[0]
+        used_sdr.append(os.path.join(CACHE, *(base + ".sdr").split("/")))
     for row in rows:
         r = {k: row[k] for k in cols}
         loc = r.get("p_location") or ""
@@ -835,6 +895,9 @@ def main():
                     help="use this cc.db (e.g. a copy) instead of the synced one; read only")
     ap.add_argument("--fmcache", metavar="PATH",
                     help="use this fmcache.db instead of the synced one; read only")
+    ap.add_argument("--include-deleted", action="store_true",
+                    help="also list books deleted from the Kindle whose reading "
+                         "files (.sdr) are still there")
     args = ap.parse_args()
 
     global CCDB_OVERRIDE, FMCACHE_OVERRIDE
@@ -844,6 +907,8 @@ def main():
         if path and not os.path.isfile(path):
             sys.exit("%s: no such file: %s" % (opt, path))
     CCDB_OVERRIDE = args.ccdb and os.path.abspath(args.ccdb)
+    global INCLUDE_DELETED
+    INCLUDE_DELETED = args.include_deleted
     FMCACHE_OVERRIDE = args.fmcache and os.path.abspath(args.fmcache)
 
     if args.local:

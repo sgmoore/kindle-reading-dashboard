@@ -228,7 +228,7 @@ class KindleReadingAction(InterfaceAction):
         """Settings snapshot handed to the worker threads."""
         cfg = {k: prefs[k] for k in (
             "source", "ssh_host", "ssh_user", "ssh_password", "ssh_key",
-            "ccdb_path", "fmcache_path")}
+            "ccdb_path", "fmcache_path", "include_deleted")}
         cfg["usb_pref"] = prefs["usb_documents"]
         cfg["dev_prefixes"] = self._device_prefixes()
         return cfg
@@ -274,7 +274,8 @@ class KindleReadingAction(InterfaceAction):
 
         self.gui.device_manager.create_job(
             engine.sync_mtp, fetched,
-            "Kindle reading: fetch sidecars over MTP", args=[dev, cache])
+            "Kindle reading: fetch sidecars over MTP",
+            args=[dev, cache, cfg["include_deleted"]])
         self.gui.status_bar.show_message(
             "Reading Kindle sidecars over MTP…", 3000)
 
@@ -495,7 +496,8 @@ class KindleReadingAction(InterfaceAction):
             self.gui.device_manager.create_job(
                 engine.sync_mtp,
                 lambda job: self._dashboard_synced(job, dash_dir, staging, cfg),
-                "Kindle reading: read the Kindle for the dashboard", args=[dev, staging])
+                "Kindle reading: read the Kindle for the dashboard",
+                args=[dev, staging, cfg["include_deleted"]])
         else:
             job = ThreadedJob(
                 "kindle_reading_dashboard", "Reading the Kindle for the dashboard",
@@ -532,6 +534,8 @@ class KindleReadingAction(InterfaceAction):
                 "pick a copy of cc.db in Configure, then open the dashboard again."
                 "\n\n" + (note or ""), show=True)
         args = ["serve", "--no-sync", "--cache", cache]
+        if cfg.get("include_deleted"):
+            args.append("--include-deleted")
         for key, opt in (("ccdb_path", "--ccdb"), ("fmcache_path", "--fmcache")):
             if cfg.get(key) and os.path.isfile(cfg[key]):
                 args += [opt, cfg[key]]
