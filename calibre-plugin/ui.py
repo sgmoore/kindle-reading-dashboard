@@ -547,9 +547,13 @@ class KindleReadingAction(InterfaceAction):
         from calibre.utils.config import config_dir
         import zipfile
         base = self.interface_action_base_plugin
-        ver = ".".join(map(str, base.version))
         dest = os.path.join(config_dir, "plugins", "kindle_reading_dashboard")
         marker = os.path.join(dest, ".version")
+        with zipfile.ZipFile(base.plugin_path) as zf:
+            # version + the files' CRCs, so a rebuilt zip with the same
+            # version number is still extracted again
+            crc = sum(i.CRC for i in zf.infolist() if i.filename.startswith("dashboard/"))
+            ver = "%s:%08x" % (".".join(map(str, base.version)), crc & 0xffffffff)
         try:
             with open(marker, encoding="utf-8") as f:
                 if f.read().strip() == ver:

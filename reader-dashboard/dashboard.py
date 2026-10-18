@@ -550,11 +550,14 @@ def build():
     ccdb = CCDB_OVERRIDE or DB_PATH
     if os.path.exists(ccdb):
         books, used_sdr = _books_from_ccdb(ccdb, fm)
-        # books on the device that this cc.db does not know (e.g. an older copy)
-        extra = _books_from_sidecars(fm, skip=used_sdr)
-        if extra:
-            print("%d book(s) not in cc.db, added from their sidecars" % len(extra))
-        books += extra
+        # books on the device that an older cc.db copy does not know. A cc.db
+        # synced from the device lists every book on it, so there the other
+        # .sdr folders belong to deleted books (the Kindle leaves them behind)
+        if CCDB_OVERRIDE:
+            extra = _books_from_sidecars(fm, skip=used_sdr)
+            if extra:
+                print("%d book(s) not in cc.db, added from their sidecars" % len(extra))
+            books += extra
         source = "cc.db"
     elif any(True for _ in _iter_cached_sdr()):
         print("no cc.db - building from the sidecar files only")
@@ -651,6 +654,15 @@ def _books_from_sidecars(fm, skip=()):
     return books
 
 
+def _on_device_book(loc):
+    """cc.db also lists cloud items that are not downloaded (no location) and
+    non-book files: KUAL / KOReader launchers (.sh) and My Clippings."""
+    if not loc:
+        return False
+    name = posixpath.basename(loc)
+    return not (name.endswith(".sh") or name == "My Clippings.txt")
+
+
 def _books_from_ccdb(path, fm):
     con = _connect_ro(path)
     con.row_factory = sqlite3.Row
@@ -683,6 +695,8 @@ def _books_from_ccdb(path, fm):
     for row in rows:
         r = {k: row[k] for k in cols}
         loc = r.get("p_location") or ""
+        if not _on_device_book(loc):
+            continue
         # locate sidecars: <loc minus ext>.sdr/  under the cache
         sdr_local = None
         if loc.startswith("/mnt/us/"):

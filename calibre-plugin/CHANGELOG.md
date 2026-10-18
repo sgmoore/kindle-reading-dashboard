@@ -11,6 +11,8 @@ the MobileRead "Version History" from the first line of each section.
 - Source = auto now also finds a Kindle on USB networking (SSH) when no USB / MTP Kindle is connected and the SSH host answers.
 - "Import automatically when the Kindle connects" now also works over SSH (Source = auto or ssh): the plugin checks every 10 seconds whether the Kindle answers and imports when it appears.
 - Open web dashboard no longer starts a second server each time on Windows (the old one kept running).
+- Books deleted from the Kindle no longer show up: the Kindle keeps a deleted book's .sdr folder, so reading files are now only read for books that are still on the device (USB, MTP and SSH).
+- The dashboard no longer lists cloud-only items (not downloaded), KUAL / KOReader launchers (.sh) or My Clippings.
 - Open web dashboard no longer fails silently when the Kindle was read but nothing came back (e.g. password login without SSH support): it shows an error instead.
 
 ## 1.3.3

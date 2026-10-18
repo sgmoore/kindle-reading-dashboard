@@ -273,6 +273,12 @@ class SSH(object):
         return [l for l in data.decode("utf-8", "replace").splitlines()
                 if l.strip()]
 
+    def find_book_files(self):
+        """Every file under documents/ outside the .sdr folders."""
+        data = self.run_bytes("find '%s' -type f ! -path '*.sdr/*'" % REMOTE_DOCS)
+        return [l for l in data.decode("utf-8", "replace").splitlines()
+                if l.strip()]
+
     def close(self):
         if self._c is not None:
             try:
@@ -364,6 +370,9 @@ def sync_ssh(cache, cfg, progress=lambda *a: None):
         except Exception:  # noqa
             pass
         files = ssh.find_sidecars()
+        books = [posixpath.relpath(p, REMOTE_DOCS) for p in ssh.find_book_files()]
+        files = [REMOTE_DOCS + "/" + r for r in drop_orphans(
+            [posixpath.relpath(p, REMOTE_DOCS) for p in files], books)]
         for i, remote in enumerate(files, 1):
             rel = posixpath.relpath(remote, REMOTE_DOCS)
             local = os.path.join(docs, *rel.split("/"))
@@ -380,12 +389,40 @@ def sync_ssh(cache, cfg, progress=lambda *a: None):
             "Check the SSH user and password in Configure." % cfg["ssh_host"])
 
 
+def drop_orphans(sidecars, book_files):
+    """Keep only sidecars whose book is still on the device. The Kindle keeps
+    a book's "<book minus extension>.sdr/" folder after the book is deleted,
+    so without this the dashboard lists books that are gone. Paths are
+    relative to documents/ with '/' separators. With no book list (listing
+    failed) nothing is dropped."""
+    if not book_files:
+        return list(sidecars)
+    bases = set()
+    for f in book_files:
+        f = f.replace("\\", "/")
+        bases.add(f)                          # "KOReader.sh" -> "KOReader.sh.sdr"
+        bases.add(posixpath.splitext(f)[0])   # "x.azw3" -> "x.sdr"
+    out = []
+    for s in sidecars:
+        s2 = s.replace("\\", "/")
+        sdr = s2.split(".sdr/", 1)[0] if ".sdr/" in s2 else None
+        if sdr is None or sdr in bases:
+            out.append(s)
+    return out
+
+
 def sync_usb(documents, cache, progress=lambda *a: None):
     docs = os.path.join(cache, "documents")
     os.makedirs(docs, exist_ok=True)
     srcs = []
     for pat in ["**/*" + ext for ext in SIDECAR_EXTS]:
         srcs += glob.glob(os.path.join(documents, pat), recursive=True)
+    books = []
+    for dirpath, dirs, names in os.walk(documents):
+        dirs[:] = [d for d in dirs if not d.endswith(".sdr")]
+        books += [os.path.relpath(os.path.join(dirpath, n), documents) for n in names]
+    srcs = [os.path.join(documents, r) for r in drop_orphans(
+        [os.path.relpath(s, documents) for s in srcs], books)]
     for i, src in enumerate(srcs, 1):
         rel = os.path.relpath(src, documents)
         dst = os.path.join(docs, rel)
@@ -431,7 +468,7 @@ def sync_mtp(dev, cache):
     fsc = dev.filesystem_cache
     storage = fsc.storage(getattr(dev, "_main_id", None)) or fsc.entries[0]
 
-    found = []
+    found, books = [], []
 
     def walk(names):
         for e in dev.list_folder_by_name(storage, *names):
@@ -439,8 +476,12 @@ def sync_mtp(dev, cache):
                 walk(names + (e.name,))
             elif e.name.endswith(SIDECAR_EXTS):
                 found.append(names + (e.name,))
+            elif not any(n.endswith(".sdr") for n in names):
+                books.append("/".join(names[1:] + (e.name,)))
 
     walk(("documents",))
+    keep = set(drop_orphans(["/".join(n[1:]) for n in found], books))
+    found = [n for n in found if "/".join(n[1:]) in keep]
     for names in found:
         local = os.path.join(docs, *names[1:])
         os.makedirs(os.path.dirname(local), exist_ok=True)
