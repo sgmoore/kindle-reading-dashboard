@@ -461,9 +461,18 @@ def _stats_from_timer(tm, bi):
     n = sum(d.get("count", 0) for d in dists if isinstance(d, dict))
     out["wpm_reading"] = round(s / n) if n else out["wpm_overall"]
     out["speed_samples"] = n
-    if isinstance(bi, dict):
-        out["book_words"] = bi.get("numberOfWords", 0)
+    out["book_words"] = _book_words(bi)
     return out
+
+
+def _book_words(bi):
+    """Estimated words in the whole book: numberOfWords only covers the
+    percentOfBook fraction the Kindle has counted so far, so scale up."""
+    if not isinstance(bi, dict):
+        return 0
+    n = bi.get("numberOfWords") or 0
+    p = bi.get("percentOfBook") or 0.0
+    return int(round(n / p)) if n and p > 0 else 0
 
 
 def _connect_ro(path):

@@ -64,7 +64,9 @@ def main():
         rows.append({
             "title": clean_title(j), "minutes": round(mins, 1), "words_read": tw,
             "wpm": round(tw / mins) if mins else 0, "percent": round(tp * 100, 1),
-            "book_words": bi.get("numberOfWords", 0),
+            # numberOfWords covers only percentOfBook of the book: scale up
+            "book_words": (round(bi.get("numberOfWords", 0) / bi["percentOfBook"])
+                           if bi.get("percentOfBook") else 0),
         })
     rows.sort(key=lambda r: -r["minutes"])
 
