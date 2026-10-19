@@ -62,8 +62,8 @@ This is how the Kindle estimates reading speed and "X minutes left in chapter".
 ### `book.info.store`
 | Field | Type | Meaning |
 |-------|------|---------|
-| `numberOfWords` | long | total words in the book |
-| `percentOfBook` | double | fraction of book with known word counts |
+| `numberOfWords` | long | words the Kindle has counted so far (not the whole book) |
+| `percentOfBook` | double | fraction of the book (0-1) those words cover; whole book ≈ `numberOfWords / percentOfBook` |
 
 ### `page.history.store` — page-turn history
 Array of `page.history.record`: `{position (string), time (ISO datetime)}`. The basis for a reading timeline. Sparse on FW 5.18.x.

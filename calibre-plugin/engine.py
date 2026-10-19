@@ -114,9 +114,19 @@ def _stats_from_timer(tm, bi):
     s = sum(d.get("sum", 0) for d in dists if isinstance(d, dict))
     n = sum(d.get("count", 0) for d in dists if isinstance(d, dict))
     out["wpm_reading"] = round(s / n) if n else out["wpm_overall"]
-    if isinstance(bi, dict):
-        out["book_words"] = bi.get("numberOfWords", 0)
+    out["book_words"] = _book_words(bi)
     return out
+
+
+def _book_words(bi):
+    """Estimated words in the whole book. book.info.store only holds the words
+    the Kindle has counted so far (numberOfWords) and the fraction of the book
+    they cover (percentOfBook), so scale up; 0 when nothing is counted yet."""
+    if not isinstance(bi, dict):
+        return 0
+    n = bi.get("numberOfWords") or 0
+    p = bi.get("percentOfBook") or 0.0
+    return int(round(n / p)) if n and p > 0 else 0
 
 
 # ---- page mapping (apnx oPNToPosition: index = printed page) -------------- #
